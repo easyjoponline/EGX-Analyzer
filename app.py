@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import pytz
 import os
 
 st.set_page_config(
@@ -86,6 +87,7 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
 EGX_STOCKS = {
     "COMI.CA": "البنك التجاري الدولي (CIB)",
     "TMGH.CA": "مجموعة طلعت مصطفى القابضة",
@@ -161,7 +163,7 @@ EGX_STOCKS = {
 TRADES_FILE = "trades_log.csv"
 
 def get_first_row(df_obj):
-    return next(df_obj.iterrows())[1]
+    return next(df_obj.iterrows())
 
 def load_trades():
     if os.path.exists(TRADES_FILE):
@@ -170,8 +172,10 @@ def load_trades():
 
 def save_trade(ticker, name, entry, sl, target):
     df_t = load_trades()
+    cairo_tz = pytz.timezone("Africa/Cairo")
+    now_str = datetime.now(cairo_tz).strftime("%Y-%m-%d %H:%M")
     new_row = pd.DataFrame([{
-        "تاريخ الإضافة": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "تاريخ الإضافة": now_str,
         "الرمز": ticker,
         "اسم الشركة": name,
         "سعر الشراء": round(entry, 2),
@@ -214,21 +218,56 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=120)
 def fetch_all_stocks_parallel(tickers_dict):
     results = {}
-    fetch_time = datetime.now().strftime("%Y-%m-%d | %I:%M:%S %p")
+    cairo_tz = pytz.timezone("Africa/Cairo")
+    fetch_time = datetime.now(cairo_tz).strftime("%Y-%m-%d | %I:%M:%S %p")
     
     def fetch_single(item):
         ticker, name = item
         try:
             stock = yf.Ticker(ticker)
-            df = stock.history(period="4mo")
-            if len(df) >= 15:
-                df['RSI'] = calculate_rsi(df['Close'], 14)
-                df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
-                df['Vol_Avg10'] = df['Volume'].rolling(window=10).mean()
-                return ticker, (name, df)
+            df_daily = stock.history(period="4mo", interval="1d")
+            if len(df_daily) < 15:
+                return ticker, None
+
+            df_daily.index = pd.to_datetime(df_daily.index).tz_localize(None)
+            last_daily_date = df_daily.index[-1].date()
+
+            df_intra = stock.history(period="2d", interval="15m")
+            if not df_intra.empty:
+                df_intra.index = pd.to_datetime(df_intra.index).tz_localize(None)
+                latest_intra_date = df_intra.index[-1].date()
+                
+                if latest_intra_date >= last_daily_date:
+                    today_bars = df_intra[df_intra.index.date == latest_intra_date]
+                    if not today_bars.empty:
+                        live_open = float(today_bars["Open"].iloc[0])
+                        live_high = float(today_bars["High"].max())
+                        live_low = float(today_bars["Low"].min())
+                        live_close = float(today_bars["Close"].iloc[-1])
+                        live_vol = float(today_bars["Volume"].sum())
+                        
+                        new_ts = pd.Timestamp(latest_intra_date)
+                        if latest_intra_date == last_daily_date:
+                            df_daily.loc[df_daily.index[-1], ["Open", "High", "Low", "Close", "Volume"]] = [
+                                live_open, live_high, live_low, live_close, live_vol
+                            ]
+                        else:
+                            new_candle = pd.DataFrame({
+                                "Open": [live_open],
+                                "High": [live_high],
+                                "Low": [live_low],
+                                "Close": [live_close],
+                                "Volume": [live_vol]
+                            }, index=[new_ts])
+                            df_daily = pd.concat([df_daily, new_candle])
+
+            df_daily['RSI'] = calculate_rsi(df_daily['Close'], 14)
+            df_daily['EMA20'] = df_daily['Close'].ewm(span=20, adjust=False).mean()
+            df_daily['Vol_Avg10'] = df_daily['Volume'].rolling(window=10).mean()
+            return ticker, (name, df_daily)
         except Exception:
             pass
         return ticker, None
@@ -241,7 +280,7 @@ def fetch_all_stocks_parallel(tickers_dict):
     return results, fetch_time
 st.sidebar.title("⚡ EGX Analyzer Pro")
 
-if st.sidebar.button("🔄 تحديث الأسعار الآن (Refresh)", use_container_width=True, type="primary"):
+if st.sidebar.button("🔄 تحديث الأسعار اللحظية الآن (Refresh)", use_container_width=True, type="primary"):
     st.cache_data.clear()
     st.rerun()
 
@@ -269,7 +308,7 @@ for t_code in saved_trades_df["الرمز"].unique():
     if full_t not in active_stocks:
         active_stocks[full_t] = f"سهم مسجل ({t_code})"
 
-with st.spinner("جاري سحب وتحليل بيانات البورصة المصرية بالكامل..."):
+with st.spinner("جاري سحب البيانات اللحظية واليومية للبورصة المصرية..."):
     raw_market_data, last_update_time = fetch_all_stocks_parallel(active_stocks)
 
 summary_list = []
@@ -319,7 +358,7 @@ for ticker, (name, df) in raw_market_data.items():
         summary_list.append({
             "الرمز": ticker.replace(".CA", ""),
             "اسم الشركة": name,
-            "الإغلاق": last_close,
+            "السعر": last_close,
             "أعلى الجلسة": session_high,
             "أقل الجلسة": session_low,
             "التغير %": change_pct,
@@ -341,6 +380,7 @@ df_summary = pd.DataFrame(summary_list)
 if df_summary.empty:
     st.error("تعذر تحميل البيانات. تأكد من الاتصال بالإنترنت والمحاولة مرة أخرى.")
     st.stop()
+
 default_index = 0
 if custom_ticker:
     clean_custom = custom_ticker.replace(".CA", "")
@@ -358,10 +398,10 @@ selected_short = st.sidebar.selectbox(
 
 st.title("📊 منصة التحليل الفني للبورصة المصرية | EGX Analyzer Pro")
 
-latest_market_date = get_first_row(df_summary)["تاريخ الجلسة"]
+latest_market_date = df_summary["تاريخ الجلسة"].max()
 st.markdown(f"""
 <div class="timestamp-bar">
-    🕒 <strong>آخر تحديث للبيانات:</strong> <span dir="ltr">{last_update_time}</span> &nbsp;|&nbsp; 📅 <strong>آخر جلسة مسجلة:</strong> <span dir="ltr">{latest_market_date}</span> &nbsp;|&nbsp; 📊 <strong>الأسهم المحللة:</strong> {len(df_summary)} سهم
+    🕒 <strong>آخر تحديث (توقيت القاهرة):</strong> <span dir="ltr">{last_update_time}</span> &nbsp;|&nbsp; 📅 <strong>أحدث جلسة معروضة:</strong> <span dir="ltr">{latest_market_date}</span> &nbsp;|&nbsp; 📊 <strong>الأسهم المحللة:</strong> {len(df_summary)} سهم
 </div>
 """, unsafe_allow_html=True)
 
@@ -381,23 +421,23 @@ with tab1:
     row = get_first_row(df_summary[df_summary["الرمز"] == selected_short])
     df_chart = hist_dict[row["ticker_full"]]
     
-    st.subheader(f"📌 {row['اسم الشركة']} ({selected_short})")
+    st.subheader(f"📌 {row['اسم الشركة']} ({selected_short}) — جلسة {row['تاريخ الجلسة']}")
     
-    if row["الإغلاق"] > row["Pivot"]:
+    if row["السعر"] > row["Pivot"]:
         st.markdown(f"""
         <div class="trend-bull">
-            📈 اتجاه السهم: <strong>صاعد (إيجابي)</strong> — السعر ({row['الإغلاق']}) أعلى نقطة الارتكاز ({row['Pivot']}) &nbsp;|&nbsp; 📊 الفوليوم: <strong>{row['حجم التداول']}</strong> &nbsp;|&nbsp; ⚡ RSI: <strong>{row['RSI']}</strong> &nbsp;|&nbsp; 💡 {row['الإشارة الفنية']}
+            📈 اتجاه السهم: <strong>صاعد (إيجابي)</strong> — السعر ({row['السعر']}) أعلى نقطة الارتكاز ({row['Pivot']}) &nbsp;|&nbsp; 📊 الفوليوم: <strong>{row['حجم التداول']}</strong> &nbsp;|&nbsp; ⚡ RSI: <strong>{row['RSI']}</strong> &nbsp;|&nbsp; 💡 {row['الإشارة الفنية']}
         </div>
         """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
         <div class="trend-bear">
-            📉 اتجاه السهم: <strong>هابط (سلبي)</strong> — السعر ({row['الإغلاق']}) أدنى نقطة الارتكاز ({row['Pivot']}) &nbsp;|&nbsp; 📊 الفوليوم: <strong>{row['حجم التداول']}</strong> &nbsp;|&nbsp; ⚡ RSI: <strong>{row['RSI']}</strong> &nbsp;|&nbsp; 💡 {row['الإشارة الفنية']}
+            📉 اتجاه السهم: <strong>هابط (سلبي)</strong> — السعر ({row['السعر']}) أدنى نقطة الارتكاز ({row['Pivot']}) &nbsp;|&nbsp; 📊 الفوليوم: <strong>{row['حجم التداول']}</strong> &nbsp;|&nbsp; ⚡ RSI: <strong>{row['RSI']}</strong> &nbsp;|&nbsp; 💡 {row['الإشارة الفنية']}
         </div>
         """, unsafe_allow_html=True)
     
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("آخر إغلاق", f"{row['الإغلاق']} EGP", f"{row['التغير %']}%")
+    c1.metric("السعر الحالي / الإغلاق", f"{row['السعر']} EGP", f"{row['التغير %']}%")
     c2.metric("نقطة الارتكاز (P)", f"{row['Pivot']}")
     c3.metric("المقاومة R1", f"{row['R1']}", f"+{row['المسافة لـ R1 %']}%")
     c4.metric("المقاومة R2", f"{row['R2']}")
@@ -466,7 +506,6 @@ with tab1:
     fig.update_yaxes(dict(title_text="RSI (14)", range=list((0, 100))), row=3, col=1)
 
     st.plotly_chart(fig, use_container_width=True)
-
 with tab2:
     st.subheader(f"📋 رادار البورصة المصرية الشامل ({pivot_method} Pivots)")
     
@@ -474,7 +513,7 @@ with tab2:
     filter_opt = col_f1.radio("تصفية حسب الاتجاه:", ["الكل", "صاعد 🟢", "هابط 🔴"], horizontal=True)
     vol_filter = col_f2.radio("تصفية حسب حجم التداول (Volume):", ["جميع الأحجام", "سيولة مرتفعة 🔥 / عالية 📈", "سيولة قليلة 📉"], horizontal=True)
     
-    table_df = df_summary.drop(columns=["ticker_full", "تاريخ الجلسة", "أعلى الجلسة", "أقل الجلسة", "نسبة السيولة"])
+    table_df = df_summary.drop(columns=["ticker_full", "أعلى الجلسة", "أقل الجلسة", "نسبة السيولة"])
     if filter_opt != "الكل":
         table_df = table_df[table_df["الاتجاه"] == filter_opt]
     if vol_filter == "سيولة مرتفعة 🔥 / عالية 📈":
@@ -498,67 +537,15 @@ with tab2:
         use_container_width=True,
         hide_index=True
     )
+
 with tab3:
     st.subheader(f"🧮 تسجيل صفقة جديدة ومتابعتها لسهم {selected_short}")
     row = get_first_row(df_summary[df_summary["الرمز"] == selected_short])
     
-    curr_close = float(row["الإغلاق"])
-    p_val = float(row["Pivot"])
-    s1_val, s2_val, s3_val = float(row["S1"]), float(row["S2"]), float(row["S3"])
-    r1_val, r2_val, r3_val = float(row["R1"]), float(row["R2"]), float(row["R3"])
-
-    MIN_SAFE_DIST = 2.0
-    suggested_sl = None
-    sl_reason = ""
-    skipped_notes = []
-
-    candidate_supports = [
-        ("نقطة الارتكاز P", p_val),
-        ("الدعم S1", s1_val),
-        ("الدعم S2", s2_val),
-        ("الدعم S3", s3_val)
-    ]
-
-    for lvl_name, lvl_price in candidate_supports:
-        if lvl_price < curr_close:
-            dist_pct = ((curr_close - lvl_price) / curr_close) * 100
-            if dist_pct >= MIN_SAFE_DIST:
-                suggested_sl = lvl_price
-                if skipped_notes:
-                    sl_reason = f"{lvl_name} (بعد تجاوز {', '.join(skipped_notes)} لقربهما < 2%)"
-                else:
-                    sl_reason = f"{lvl_name} (يبعد {round(dist_pct, 1)}%)"
-                break
-            else:
-                skipped_notes.append(f"{lvl_name} ({round(dist_pct, 1)}%)")
-
-    if suggested_sl is None:
-        suggested_sl = round(curr_close * 0.975, 2)
-        sl_reason = "حماية تلقائية -2.5% (لعدم وجود دعم يبعد 2%)"
-
-    suggested_target = None
-    target_reason = ""
-    for lvl_name, lvl_price in [("الارتكاز P", p_val), ("المقاومة R1", r1_val), ("المقاومة R2", r2_val), ("المقاومة R3", r3_val)]:
-        if lvl_price > curr_close:
-            suggested_target = lvl_price
-            target_reason = lvl_name
-            break
-
-    if suggested_target is None or suggested_target <= curr_close:
-        suggested_target = round(curr_close * 1.03, 2)
-        target_reason = "هدف تلقائي +3%"
-
     col_in1, col_in2, col_in3 = st.columns(3)
-    entry_price = col_in1.number_input("سعر الشراء (EGP):", value=curr_close, step=0.05)
-    stop_loss = col_in2.number_input(f"وقف الخسارة (مقترح: {sl_reason}):", value=float(suggested_sl), step=0.05)
-    target_price = col_in3.number_input(f"سعر الهدف (مقترح: {target_reason}):", value=float(suggested_target), step=0.05)
-
-    with st.expander("ℹ️ كيف يقوم النظام باقتراح وقف الخسارة والهدف تلقائياً؟ (اضغط للتفاصيل)", expanded=True):
-        st.markdown("""
-        * **قاعدة مسافة الأمان لوقف الخسارة (2%):** يفحص النظام المستويات أسفل السعر بالترتيب (**نقطة الارتكاز P ← الدعم S1 ← الدعم S2 ← الدعم S3**).
-        * **تجنب الكسر الكاذب:** إذا كان السعر الحالي قريباً جداً من مستوى الدعم بفرق **أقل من 2%**، يتجاوزه النظام تلقائياً وينتقل للدعم الذي يليه (**S2** أو **S3**) حتى لا تخرج من الصفقة بسبب تذبذب بسيط.
-        * **تحديد الهدف:** يختار النظام تلقائياً أقرب مستوى ارتكاز أو مقاومة يقع أعلى سعر الشراء (**P** أو **R1** أو **R2** أو **R3**)، ويمكنك تعديل أي رقم يدوياً حسب رؤيتك.
-        """)
+    entry_price = col_in1.number_input("سعر الشراء (EGP):", value=float(row["السعر"]), step=0.05)
+    stop_loss = col_in2.number_input("سعر وقف الخسارة (مقترح S1):", value=float(row["S1"]), step=0.05)
+    target_price = col_in3.number_input("سعر الهدف (مقترح R1):", value=float(row["R1"]), step=0.05)
 
     risk = entry_price - stop_loss
     reward = target_price - entry_price
@@ -577,7 +564,8 @@ with tab3:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("💾 حفظ الصفقة في التقرير لمتابعتها مع التحديثات", type="primary", use_container_width=True):
             save_trade(selected_short, row["اسم الشركة"], entry_price, stop_loss, target_price)
-            st.success(f"تم حفظ صفقة **{selected_short}** بتوقيت ({datetime.now().strftime('%Y-%m-%d %H:%M')})! انتقل إلى تبويب **(📑 تقرير سجل الصفقات)** للمتابعة.")
+            cairo_tz = pytz.timezone("Africa/Cairo")
+            st.success(f"تم حفظ صفقة **{selected_short}** بتوقيت ({datetime.now(cairo_tz).strftime('%Y-%m-%d %H:%M')})! انتقل إلى تبويب **(📑 تقرير سجل الصفقات)** للمتابعة.")
     else:
         st.warning("تأكد من أن سعر الهدف أعلى من سعر الشراء، وسعر وقف الخسارة أقل من سعر الشراء.")
 
