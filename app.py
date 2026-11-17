@@ -162,7 +162,8 @@ EGX_STOCKS = {
 TRADES_FILE = "trades_log.csv"
 
 def get_first_row(df_obj):
-    return next(df_obj.iterrows())
+    for _, r in df_obj.iterrows():
+        return r
 
 def load_trades():
     if os.path.exists(TRADES_FILE):
