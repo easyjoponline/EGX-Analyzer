@@ -3,7 +3,6 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import pytz
 import os
@@ -218,65 +217,95 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=180)
 def fetch_all_stocks_parallel(tickers_dict):
     results = {}
     cairo_tz = pytz.timezone("Africa/Cairo")
     fetch_time = datetime.now(cairo_tz).strftime("%Y-%m-%d | %I:%M:%S %p")
+    tickers_list = list(tickers_dict.keys())
     
-    def fetch_single(item):
-        ticker, name = item
+    try:
+        raw_daily = yf.download(
+            tickers=tickers_list,
+            period="4mo",
+            interval="1d",
+            group_by="ticker",
+            threads=True,
+            progress=False
+        )
+    except Exception:
+        return results, fetch_time
+
+    raw_intra = pd.DataFrame()
+    try:
+        raw_intra = yf.download(
+            tickers=tickers_list,
+            period="2d",
+            interval="15m",
+            group_by="ticker",
+            threads=True,
+            progress=False
+        )
+    except Exception:
+        pass
+
+    for ticker, name in tickers_dict.items():
         try:
-            stock = yf.Ticker(ticker)
-            df_daily = stock.history(period="4mo", interval="1d")
+            if isinstance(raw_daily.columns, pd.MultiIndex):
+                if ticker not in raw_daily.columns.get_level_values(0):
+                    continue
+                df_daily = raw_daily[ticker].dropna(subset=["Close"]).copy()
+            else:
+                df_daily = raw_daily.dropna(subset=["Close"]).copy()
+
             if len(df_daily) < 15:
-                return ticker, None
+                continue
 
             df_daily.index = pd.to_datetime(df_daily.index).tz_localize(None)
             last_daily_date = df_daily.index[-1].date()
 
-            df_intra = stock.history(period="2d", interval="15m")
-            if not df_intra.empty:
-                df_intra.index = pd.to_datetime(df_intra.index).tz_localize(None)
-                latest_intra_date = df_intra.index[-1].date()
-                
-                if latest_intra_date >= last_daily_date:
-                    today_bars = df_intra[df_intra.index.date == latest_intra_date]
-                    if not today_bars.empty:
-                        live_open = float(today_bars["Open"].iloc[0])
-                        live_high = float(today_bars["High"].max())
-                        live_low = float(today_bars["Low"].min())
-                        live_close = float(today_bars["Close"].iloc[-1])
-                        live_vol = float(today_bars["Volume"].sum())
-                        
-                        new_ts = pd.Timestamp(latest_intra_date)
-                        if latest_intra_date == last_daily_date:
-                            df_daily.loc[df_daily.index[-1], ["Open", "High", "Low", "Close", "Volume"]] = [
-                                live_open, live_high, live_low, live_close, live_vol
-                            ]
-                        else:
-                            new_candle = pd.DataFrame({
-                                "Open": [live_open],
-                                "High": [live_high],
-                                "Low": [live_low],
-                                "Close": [live_close],
-                                "Volume": [live_vol]
-                            }, index=[new_ts])
-                            df_daily = pd.concat([df_daily, new_candle])
+            if not raw_intra.empty:
+                df_intra = pd.DataFrame()
+                if isinstance(raw_intra.columns, pd.MultiIndex):
+                    if ticker in raw_intra.columns.get_level_values(0):
+                        df_intra = raw_intra[ticker].dropna(subset=["Close"]).copy()
+                else:
+                    df_intra = raw_intra.dropna(subset=["Close"]).copy()
+
+                if not df_intra.empty:
+                    df_intra.index = pd.to_datetime(df_intra.index).tz_localize(None)
+                    latest_intra_date = df_intra.index[-1].date()
+                    if latest_intra_date >= last_daily_date:
+                        today_bars = df_intra[df_intra.index.date == latest_intra_date]
+                        if not today_bars.empty:
+                            live_open = float(next(iter(today_bars["Open"])))
+                            live_high = float(today_bars["High"].max())
+                            live_low = float(today_bars["Low"].min())
+                            live_close = float(today_bars["Close"].iloc[-1])
+                            live_vol = float(today_bars["Volume"].sum())
+
+                            new_ts = pd.Timestamp(latest_intra_date)
+                            if latest_intra_date == last_daily_date:
+                                df_daily.loc[df_daily.index[-1], ["Open", "High", "Low", "Close", "Volume"]] = [
+                                    live_open, live_high, live_low, live_close, live_vol
+                                ]
+                            else:
+                                new_candle = pd.DataFrame({
+                                    "Open": [live_open],
+                                    "High": [live_high],
+                                    "Low": [live_low],
+                                    "Close": [live_close],
+                                    "Volume": [live_vol]
+                                }, index=[new_ts])
+                                df_daily = pd.concat([df_daily, new_candle])
 
             df_daily['RSI'] = calculate_rsi(df_daily['Close'], 14)
             df_daily['EMA20'] = df_daily['Close'].ewm(span=20, adjust=False).mean()
             df_daily['Vol_Avg10'] = df_daily['Volume'].rolling(window=10).mean()
-            return ticker, (name, df_daily)
+            results[ticker] = (name, df_daily)
         except Exception:
-            pass
-        return ticker, None
+            continue
 
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        for ticker, data in executor.map(fetch_single, tickers_dict.items()):
-            if data is not None:
-                results[ticker] = data
-                
     return results, fetch_time
 st.sidebar.title("⚡ EGX Analyzer Pro")
 
