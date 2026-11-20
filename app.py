@@ -106,7 +106,6 @@ EGX_STOCKS = {
     "ORAS.CA": "أوراسكوم كونستراكشون",
     "HELI.CA": "مصر الجديدة للإسكان والتعمير",
     "PHDC.CA": "بالم هيلز للتعمير",
-    "ESRS.CA": "حدايد عز",
     "EFIH.CA": "إي فاينانس للاستثمارات المالية",
     "EKHO.CA": "القابضة المصرية الكويتية (دولار)",
     "EKHOA.CA": "القابضة المصرية الكويتية (جنيه)",
@@ -160,15 +159,13 @@ EGX_STOCKS = {
     "RAYA.CA": "راية القابضة للاستثمارات المالية",
     "MTIE.CA": "إم إم جروب للصناعة والتجارة",
     "CNFN.CA": "كونتكت المالية القابضة",
-    "VALU.CA": "فاليو للتمويل الاستهلاكي",
-    "ACTF.CA": "أكت فاينانشال للاستشارات",
     "OFH.CA": "أوراسكوم المالية القابضة",
     "OIH.CA": "أوراسكوم للاستثمار القابضة"
 }
 TRADES_FILE = "trades_log.csv"
 
 def get_first_row(df_obj):
-    return next(df_obj.iterrows())
+    return next(df_obj.iterrows())[1]
 
 def load_trades():
     if os.path.exists(TRADES_FILE):
@@ -232,7 +229,7 @@ def fetch_all_stocks_parallel(tickers_dict, timeframe_choice="15m"):
         tv_sym = ticker.replace(".CA", "")
         df_intraday = None
         df_daily = None
-        source_used = "TradingView (15m)"
+        source_used = "TradingView (15m)" if timeframe_choice == "15m" else "TradingView (Daily)"
         
         if tv_client is not None:
             try:
@@ -241,8 +238,8 @@ def fetch_all_stocks_parallel(tickers_dict, timeframe_choice="15m"):
                 df_tv_d = tv_client.get_hist(symbol=tv_sym, exchange="EGX", interval=Interval.in_daily, n_bars=10)
                 
                 if df_tv is not None and len(df_tv) >= 15 and df_tv_d is not None and len(df_tv_d) >= 2:
-                    df_tv.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}, inplace=True)
-                    df_tv_d.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}, inplace=True)
+                    df_tv = df_tv.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"})
+                    df_tv_d = df_tv_d.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"})
                     df_intraday = df_tv
                     df_daily = df_tv_d
             except Exception:
@@ -273,7 +270,7 @@ def fetch_all_stocks_parallel(tickers_dict, timeframe_choice="15m"):
             
         return ticker, None
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         for ticker, data in executor.map(fetch_single, tickers_dict.items()):
             if data is not None:
                 results[ticker] = data
@@ -517,3 +514,185 @@ with tab1:
     fig.update_yaxes(dict(title_text="RSI (14)", range=list((0, 100))), row=3, col=1)
 
     st.plotly_chart(fig, use_container_width=True)
+with tab2:
+    st.subheader(f"📋 رادار البورصة المصرية الشامل ({pivot_method} Pivots — {timeframe_opt})")
+    
+    col_f1, col_f2 = st.columns(2)
+    filter_opt = col_f1.radio("تصفية حسب الاتجاه:", ["الكل", "صاعد 🟢", "هابط 🔴"], horizontal=True)
+    vol_filter = col_f2.radio("تصفية حسب حجم التداول (Volume):", ["جميع الأحجام", "سيولة مرتفعة 🔥 / عالية 📈", "سيولة قليلة 📉"], horizontal=True)
+    
+    table_df = df_summary.drop(columns=["ticker_full", "توقيت الشمعة", "أعلى الشمعة", "أقل الشمعة", "نسبة السيولة"])
+    if filter_opt != "الكل":
+        table_df = table_df[table_df["الاتجاه"] == filter_opt]
+    if vol_filter == "سيولة مرتفعة 🔥 / عالية 📈":
+        table_df = table_df[table_df["حجم التداول"].str.contains("مرتفع|عالي")]
+    elif vol_filter == "سيولة قليلة 📉":
+        table_df = table_df[table_df["حجم التداول"].str.contains("قليل")]
+
+    def style_table(val):
+        if isinstance(val, str):
+            if "صاعد" in val or "مرتفع" in val or "اختراق" in val: return "color: #16a34a; font-weight: bold;"
+            if "هابط" in val or "سلبي" in val: return "color: #dc2626; font-weight: bold;"
+            if "عالي" in val or "تشبع بيعي" in val: return "color: #2563eb; font-weight: bold;"
+        return ""
+
+    st.dataframe(
+        table_df.style
+        .map(style_table)
+        .background_gradient(subset=["S1", "S2", "S3"], cmap="Greens", low=0.25, high=0.55)
+        .background_gradient(subset=["R1", "R2", "R3"], cmap="Reds", low=0.25, high=0.55)
+        .format(precision=2),
+        use_container_width=True,
+        hide_index=True
+    )
+
+with tab3:
+    st.subheader(f"🧮 تسجيل صفقة جديدة ومتابعتها لسهم {selected_short}")
+    row = get_first_row(df_summary[df_summary["الرمز"] == selected_short])
+    
+    col_in1, col_in2, col_in3 = st.columns(3)
+    entry_price = col_in1.number_input("سعر الشراء (EGP):", value=float(row["آخر سعر"]), step=0.05)
+    stop_loss = col_in2.number_input("سعر وقف الخسارة (مقترح S1):", value=float(row["S1"]), step=0.05)
+    target_price = col_in3.number_input("سعر الهدف (مقترح R1):", value=float(row["R1"]), step=0.05)
+
+    risk = entry_price - stop_loss
+    reward = target_price - entry_price
+
+    st.markdown("---")
+    if risk > 0 and reward > 0:
+        rr_ratio = round(reward / risk, 2)
+        risk_pct = round((risk / entry_price) * 100, 2)
+        reward_pct = round((reward / entry_price) * 100, 2)
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("نسبة المخاطرة (Risk)", f"-{risk_pct}%", f"-{round(risk, 2)} EGP", delta_color="inverse")
+        m2.metric("العائد المتوقع (Reward)", f"+{reward_pct}%", f"+{round(reward, 2)} EGP")
+        m3.metric("نسبة العائد للمخاطرة (R:R)", f"1 : {rr_ratio}", "ممتازة" if rr_ratio >= 2 else "متوسطة")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("💾 حفظ الصفقة في التقرير لمتابعتها مع التحديثات", type="primary", use_container_width=True):
+            save_trade(selected_short, row["اسم الشركة"], entry_price, stop_loss, target_price)
+            st.success(f"تم حفظ صفقة **{selected_short}** بتوقيت ({datetime.now().strftime('%Y-%m-%d %H:%M')})! انتقل إلى تبويب **(📑 تقرير سجل الصفقات)** للمتابعة.")
+    else:
+        st.warning("تأكد من أن سعر الهدف أعلى من سعر الشراء، وسعر وقف الخسارة أقل من سعر الشراء.")
+
+with tab4:
+    st.subheader("📑 التقرير الإحصائي الشامل للصفقات المسجلة")
+    trades_df = load_trades()
+
+    if trades_df.empty:
+        st.info("لا توجد صفقات مسجلة حتى الآن. يمكنك تسجيل صفقاتك من تبويب **(🧮 إضافة صفقة جديدة)**.")
+    else:
+        evaluated_rows = []
+        wins_count = 0
+        losses_count = 0
+        open_count = 0
+
+        for _, t_row in trades_df.iterrows():
+            sym = str(t_row["الرمز"])
+            full_sym = f"{sym}.CA" if not sym.endswith(".CA") else sym
+            entry_dt = pd.to_datetime(t_row["تاريخ الإضافة"])
+            
+            entry = float(t_row["سعر الشراء"])
+            sl = float(t_row["وقف الخسارة"])
+            target = float(t_row["الهدف"])
+            
+            status_label = "مفتوحة (جارية) ⏳"
+            curr_p = entry
+
+            if full_sym in hist_dict:
+                stock_df = hist_dict[full_sym].copy()
+                if stock_df.index.tz is not None:
+                    stock_df.index = stock_df.index.tz_localize(None)
+                curr_p = round(float(stock_df.iloc[-1]["Close"]), 2)
+                
+                future_bars = stock_df[stock_df.index > entry_dt]
+                
+                if not future_bars.empty:
+                    for _, s_row in future_bars.iterrows():
+                        if float(s_row["Low"]) <= sl:
+                            status_label = "خاسرة (وقف خسارة) ❌"
+                            break
+                        elif float(s_row["High"]) >= target:
+                            status_label = "ناجحة (تحقق الهدف) ✅"
+                            break
+                else:
+                    if curr_p != entry:
+                        if curr_p >= target:
+                            status_label = "ناجحة (تحقق الهدف) ✅"
+                        elif curr_p <= sl:
+                            status_label = "خاسرة (وقف خسارة) ❌"
+
+            if "ناجحة" in status_label:
+                wins_count += 1
+            elif "خاسرة" in status_label:
+                losses_count += 1
+            else:
+                open_count += 1
+
+            current_pnl_pct = round(((curr_p - entry) / entry) * 100, 2)
+
+            evaluated_rows.append({
+                "تاريخ ووقت الإضافة": t_row["تاريخ الإضافة"],
+                "الرمز": sym,
+                "اسم الشركة": t_row["اسم الشركة"],
+                "سعر الشراء": entry,
+                "وقف الخسارة": sl,
+                "الهدف": target,
+                "السعر الحالي": curr_p,
+                "العائد الحالي %": current_pnl_pct,
+                "حالة الصفقة": status_label
+            })
+
+        total_trades = len(evaluated_rows)
+        closed_trades = wins_count + losses_count
+        win_rate_total = round((wins_count / total_trades) * 100, 1) if total_trades > 0 else 0.0
+        loss_rate_total = round((losses_count / total_trades) * 100, 1) if total_trades > 0 else 0.0
+        win_rate_closed = round((wins_count / closed_trades) * 100, 1) if closed_trades > 0 else 0.0
+
+        k1, k2, k3, k4, k5, k6 = st.columns(6)
+        k1.metric("إجمالي الصفقات", f"{total_trades}")
+        k2.metric("صفقات ناجحة ✅", f"{wins_count}", f"{win_rate_total}% من الإجمالي")
+        k3.metric("صفقات خاسرة ❌", f"{losses_count}", f"-{loss_rate_total}% من الإجمالي", delta_color="inverse")
+        k4.metric("صفقات مفتوحة ⏳", f"{open_count}")
+        k5.metric("نسبة النجاح (المغلقة)", f"{win_rate_closed}%")
+        k6.metric("نسبة الخسارة (المغلقة)", f"{round(100 - win_rate_closed, 1) if closed_trades > 0 else 0.0}%")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        eval_df = pd.DataFrame(evaluated_rows)
+
+        def style_trade_status(val):
+            if isinstance(val, str):
+                if "ناجحة" in val: return "color: #16a34a; font-weight: bold;"
+                if "خاسرة" in val: return "color: #dc2626; font-weight: bold;"
+                if "مفتوحة" in val: return "color: #d97706; font-weight: bold;"
+            return ""
+
+        st.dataframe(
+            eval_df.style
+            .map(style_trade_status, subset=["حالة الصفقة"])
+            .format(precision=2),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        col_btn1, col_btn2 = st.columns(2)
+        csv_export = eval_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        col_btn1.download_button(
+            label="📥 تحميل التقرير بصيغة Excel / CSV",
+            data=csv_export,
+            file_name=f"EGX_Trades_Report_{datetime.now().strftime('%Y-%m-%d')}.csv",
+            mime="text/csv"
+        )
+        if col_btn2.button("🗑️ مسح سجل الصفقات بالكامل"):
+            if os.path.exists(TRADES_FILE):
+                os.remove(TRADES_FILE)
+            st.rerun()
+
+st.markdown("""
+<div class="disclaimer-box">
+    ⚠️ <strong>إخلاء مسؤولية (Disclaimer):</strong><br>
+    جميع البيانات والمستويات السعرية ومؤشرات التحليل الفني المعروضة في منصة <strong>EGX Analyzer Pro</strong> هي لأغراض تعليمية واسترشادية فقط، ولا تُعد بأي حال من الأحوال توصية مباشرة بالبيع أو الشراء. التداول في سوق الأوراق المالية ينطوي على مخاطر عالية، وقرارك الاستثماري هو مسؤوليتك الشخصية الكاملة.
+</div>
+""", unsafe_allow_html=True)
