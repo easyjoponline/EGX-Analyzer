@@ -564,15 +564,22 @@ with tab1:
     fig.update_yaxes(dict(title_text="RSI (14)", range=list((0, 100))), row=3, col=1)
 
     st.plotly_chart(fig, width="stretch")
+if "table_reset_id" not in st.session_state:
+    st.session_state["table_reset_id"] = 0
+if "last_clicked_table" not in st.session_state:
+    st.session_state["last_clicked_table"] = ""
+
 def render_interactive_table(df_to_show, table_key, styler_obj=None):
     target_obj = styler_obj if styler_obj is not None else df_to_show.style.format(precision=2)
+    dynamic_key = f"{table_key}_{st.session_state['table_reset_id']}"
+    
     event = st.dataframe(
         target_obj,
         width="stretch",
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
-        key=table_key
+        key=dynamic_key
     )
     try:
         selected_rows_list = list(event.selection.rows)
@@ -581,13 +588,15 @@ def render_interactive_table(df_to_show, table_key, styler_obj=None):
             clicked_ticker = str(get_row_at(df_to_show, selected_row_idx)["الرمز"])
             if clicked_ticker != st.session_state["active_symbol"]:
                 st.session_state["active_symbol"] = clicked_ticker
+                st.session_state["last_clicked_table"] = table_key
+                st.session_state["table_reset_id"] += 1
                 st.rerun()
     except Exception:
         pass
 
 with tab2:
     st.subheader("⚡ رادار المضاربة اللحظية السريعة (T+0 Scalping Radar)")
-    st.caption("💡 **تلميح:** اضغط على أي صف في الجداول بالأسفل ليتم اختيار السهم تلقائياً في القائمة الجانبية، أو احفظ صفقته مباشرة من شريط التنفيذ السريع بالأسفل.")
+    st.caption("💡 **تلميح:** اضغط على أي سهم في الجداول بالأسفل ليتم تحديده حصرياً في القائمة الجانبية وإلغاء أي تحديد سابق تلقائياً.")
 
     active_t0_row = get_row_at(df_summary[df_summary["الرمز"] == selected_short], 0)
     t0_entry = float(active_t0_row["آخر سعر"])
@@ -715,7 +724,7 @@ with tab2:
 
 with tab3:
     st.subheader(f"📋 رادار البورصة المصرية الشامل ({pivot_method} Pivots — {timeframe_opt})")
-    st.caption("💡 **تلميح:** اضغط على أي صف في الجدول بالأسفل ليتم اختيار السهم تلقائياً في القائمة الجانبية وعرض كل بياناته وشارته.")
+    st.caption("💡 **تلميح:** اضغط على أي صف في الجدول بالأسفل ليتم اختيار السهم تلقائياً في القائمة الجانبية وإلغاء أي تحديد سابق.")
     
     col_f1, col_f2 = st.columns(2)
     filter_opt = col_f1.radio("تصفية حسب الاتجاه:", ["الكل", "صاعد 🟢", "هابط 🔴"], horizontal=True)
@@ -744,6 +753,7 @@ with tab3:
         .format(precision=2)
     )
     render_interactive_table(table_df, "radar_table_select", radar_styler)
+
 with tab4:
     st.subheader(f"🧮 تسجيل صفقة جديدة ومتابعتها لسهم {selected_short}")
     row = get_row_at(df_summary[df_summary["الرمز"] == selected_short], 0)
