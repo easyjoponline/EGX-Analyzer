@@ -3,4 +3,4 @@ yfinance
 plotly
 pandas
 matplotlib
-pytz
+git+https://github.com/rongardF/tvdatafeed.git

@@ -3,9 +3,15 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-import pytz
 import os
+
+try:
+    from tvDatafeed import TvDatafeed, Interval
+    TV_AVAILABLE = True
+except ImportError:
+    TV_AVAILABLE = False
 
 st.set_page_config(
     page_title="EGX Analyzer Pro | منصة تحليل البورصة المصرية",
@@ -162,8 +168,7 @@ EGX_STOCKS = {
 TRADES_FILE = "trades_log.csv"
 
 def get_first_row(df_obj):
-    for _, r in df_obj.iterrows():
-        return r
+    return next(df_obj.iterrows())
 
 def load_trades():
     if os.path.exists(TRADES_FILE):
@@ -172,10 +177,8 @@ def load_trades():
 
 def save_trade(ticker, name, entry, sl, target):
     df_t = load_trades()
-    cairo_tz = pytz.timezone("Africa/Cairo")
-    now_str = datetime.now(cairo_tz).strftime("%Y-%m-%d %H:%M")
     new_row = pd.DataFrame([{
-        "تاريخ الإضافة": now_str,
+        "تاريخ الإضافة": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "الرمز": ticker,
         "اسم الشركة": name,
         "سعر الشراء": round(entry, 2),
@@ -218,103 +221,77 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-@st.cache_data(ttl=180)
-def fetch_all_stocks_parallel(tickers_dict):
+@st.cache_data(ttl=900)
+def fetch_all_stocks_parallel(tickers_dict, timeframe_choice="15m"):
     results = {}
-    cairo_tz = pytz.timezone("Africa/Cairo")
-    fetch_time = datetime.now(cairo_tz).strftime("%Y-%m-%d | %I:%M:%S %p")
-    tickers_list = list(tickers_dict.keys())
+    fetch_time = datetime.now().strftime("%Y-%m-%d | %I:%M:%S %p")
+    tv_client = TvDatafeed() if TV_AVAILABLE else None
     
-    try:
-        raw_daily = yf.download(
-            tickers=tickers_list,
-            period="4mo",
-            interval="1d",
-            group_by="ticker",
-            threads=True,
-            progress=False
-        )
-    except Exception:
-        return results, fetch_time
+    def fetch_single(item):
+        ticker, name = item
+        tv_sym = ticker.replace(".CA", "")
+        df_intraday = None
+        df_daily = None
+        source_used = "TradingView (15m)"
+        
+        if tv_client is not None:
+            try:
+                tv_interval = Interval.in_15_minute if timeframe_choice == "15m" else Interval.in_daily
+                df_tv = tv_client.get_hist(symbol=tv_sym, exchange="EGX", interval=tv_interval, n_bars=120)
+                df_tv_d = tv_client.get_hist(symbol=tv_sym, exchange="EGX", interval=Interval.in_daily, n_bars=10)
+                
+                if df_tv is not None and len(df_tv) >= 15 and df_tv_d is not None and len(df_tv_d) >= 2:
+                    df_tv.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}, inplace=True)
+                    df_tv_d.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}, inplace=True)
+                    df_intraday = df_tv
+                    df_daily = df_tv_d
+            except Exception:
+                pass
 
-    raw_intra = pd.DataFrame()
-    try:
-        raw_intra = yf.download(
-            tickers=tickers_list,
-            period="2d",
-            interval="15m",
-            group_by="ticker",
-            threads=True,
-            progress=False
-        )
-    except Exception:
-        pass
-
-    for ticker, name in tickers_dict.items():
-        try:
-            if isinstance(raw_daily.columns, pd.MultiIndex):
-                if ticker not in raw_daily.columns.get_level_values(0):
-                    continue
-                df_daily = raw_daily[ticker].dropna(subset=["Close"]).copy()
-            else:
-                df_daily = raw_daily.dropna(subset=["Close"]).copy()
-
-            if len(df_daily) < 15:
-                continue
-
-            df_daily.index = pd.to_datetime(df_daily.index).tz_localize(None)
-            last_daily_date = df_daily.index[-1].date()
-
-            if not raw_intra.empty:
-                df_intra = pd.DataFrame()
-                if isinstance(raw_intra.columns, pd.MultiIndex):
-                    if ticker in raw_intra.columns.get_level_values(0):
-                        df_intra = raw_intra[ticker].dropna(subset=["Close"]).copy()
+        if df_intraday is None or df_daily is None:
+            try:
+                source_used = "Yahoo Finance"
+                stock = yf.Ticker(ticker)
+                df_d = stock.history(period="2mo")
+                if timeframe_choice == "15m":
+                    df_i = stock.history(period="10d", interval="15m")
+                    if len(df_i) >= 15 and len(df_d) >= 2:
+                        df_intraday = df_i
+                        df_daily = df_d
                 else:
-                    df_intra = raw_intra.dropna(subset=["Close"]).copy()
+                    if len(df_d) >= 15:
+                        df_intraday = df_d
+                        df_daily = df_d
+            except Exception:
+                pass
 
-                if not df_intra.empty:
-                    df_intra.index = pd.to_datetime(df_intra.index).tz_localize(None)
-                    latest_intra_date = df_intra.index[-1].date()
-                    if latest_intra_date >= last_daily_date:
-                        today_bars = df_intra[df_intra.index.date == latest_intra_date]
-                        if not today_bars.empty:
-                            live_open = float(next(iter(today_bars["Open"])))
-                            live_high = float(today_bars["High"].max())
-                            live_low = float(today_bars["Low"].min())
-                            live_close = float(today_bars["Close"].iloc[-1])
-                            live_vol = float(today_bars["Volume"].sum())
+        if df_intraday is not None and df_daily is not None and len(df_intraday) >= 15 and len(df_daily) >= 2:
+            df_intraday['RSI'] = calculate_rsi(df_intraday['Close'], 14)
+            df_intraday['EMA20'] = df_intraday['Close'].ewm(span=20, adjust=False).mean()
+            df_intraday['Vol_Avg10'] = df_intraday['Volume'].rolling(window=10).mean()
+            return ticker, (name, df_intraday, df_daily, source_used)
+            
+        return ticker, None
 
-                            new_ts = pd.Timestamp(latest_intra_date)
-                            if latest_intra_date == last_daily_date:
-                                df_daily.loc[df_daily.index[-1], ["Open", "High", "Low", "Close", "Volume"]] = [
-                                    live_open, live_high, live_low, live_close, live_vol
-                                ]
-                            else:
-                                new_candle = pd.DataFrame({
-                                    "Open": [live_open],
-                                    "High": [live_high],
-                                    "Low": [live_low],
-                                    "Close": [live_close],
-                                    "Volume": [live_vol]
-                                }, index=[new_ts])
-                                df_daily = pd.concat([df_daily, new_candle])
-
-            df_daily['RSI'] = calculate_rsi(df_daily['Close'], 14)
-            df_daily['EMA20'] = df_daily['Close'].ewm(span=20, adjust=False).mean()
-            df_daily['Vol_Avg10'] = df_daily['Volume'].rolling(window=10).mean()
-            results[ticker] = (name, df_daily)
-        except Exception:
-            continue
-
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        for ticker, data in executor.map(fetch_single, tickers_dict.items()):
+            if data is not None:
+                results[ticker] = data
+                
     return results, fetch_time
 st.sidebar.title("⚡ EGX Analyzer Pro")
 
-if st.sidebar.button("🔄 تحديث الأسعار اللحظية الآن (Refresh)", use_container_width=True, type="primary"):
+if st.sidebar.button("🔄 تحديث الأسعار الآن (Refresh)", use_container_width=True, type="primary"):
     st.cache_data.clear()
     st.rerun()
 
 st.sidebar.markdown("---")
+
+timeframe_opt = st.sidebar.radio(
+    "⏱️ الإطار الزمني للبيانات (Timeframe):",
+    ["15m", "Daily"],
+    format_func=lambda x: "لحظي كل 15 دقيقة (TradingView 15m)" if x == "15m" else "يومي (Daily)"
+)
 
 pivot_method = st.sidebar.selectbox(
     "📐 معادلة الحساب (Pivot Formula):",
@@ -338,29 +315,32 @@ for t_code in saved_trades_df["الرمز"].unique():
     if full_t not in active_stocks:
         active_stocks[full_t] = f"سهم مسجل ({t_code})"
 
-with st.spinner("جاري سحب البيانات اللحظية واليومية للبورصة المصرية..."):
-    raw_market_data, last_update_time = fetch_all_stocks_parallel(active_stocks)
+with st.spinner("جاري سحب البيانات المحدثة كل 15 دقيقة من TradingView..."):
+    raw_market_data, last_update_time = fetch_all_stocks_parallel(active_stocks, timeframe_opt)
 
 summary_list = []
 hist_dict = {}
+active_source = "TradingView (15m)"
 
-for ticker, (name, df) in raw_market_data.items():
-    if len(df) >= 2:
-        hist_dict[ticker] = df
-        prev = df.iloc[-2]
-        curr = df.iloc[-1]
-        last_session_date = df.index[-1].strftime("%Y-%m-%d")
+for ticker, (name, df_intra, df_day, src_used) in raw_market_data.items():
+    if len(df_intra) >= 2 and len(df_day) >= 2:
+        active_source = src_used
+        hist_dict[ticker] = df_intra
         
-        pivots = calculate_pivots(prev['High'], prev['Low'], prev['Close'], pivot_method)
-        last_close = round(curr['Close'], 2)
-        session_high = round(curr['High'], 2)
-        session_low = round(curr['Low'], 2)
-        change_pct = round(((last_close - prev['Close']) / prev['Close']) * 100, 2)
+        prev_day = df_day.iloc[-2]
+        curr_bar = df_intra.iloc[-1]
+        last_bar_time = df_intra.index[-1].strftime("%Y-%m-%d %H:%M")
+        
+        pivots = calculate_pivots(prev_day['High'], prev_day['Low'], prev_day['Close'], pivot_method)
+        last_close = round(float(curr_bar['Close']), 2)
+        bar_high = round(float(curr_bar['High']), 2)
+        bar_low = round(float(curr_bar['Low']), 2)
+        change_pct = round(((last_close - float(prev_day['Close'])) / float(prev_day['Close'])) * 100, 2)
         dist_to_r1 = round(((pivots["R1"] - last_close) / last_close) * 100, 2)
-        rsi_val = round(curr['RSI'], 1) if pd.notna(curr['RSI']) else 50.0
+        rsi_val = round(float(curr_bar['RSI']), 1) if pd.notna(curr_bar['RSI']) else 50.0
         
-        vol_curr = float(curr['Volume'])
-        vol_avg = float(curr['Vol_Avg10']) if pd.notna(curr['Vol_Avg10']) and curr['Vol_Avg10'] > 0 else vol_curr
+        vol_curr = float(curr_bar['Volume'])
+        vol_avg = float(curr_bar['Vol_Avg10']) if pd.notna(curr_bar['Vol_Avg10']) and curr_bar['Vol_Avg10'] > 0 else vol_curr
         vol_ratio = round(vol_curr / vol_avg, 2) if vol_avg > 0 else 1.0
         
         if vol_ratio >= 1.5:
@@ -388,9 +368,9 @@ for ticker, (name, df) in raw_market_data.items():
         summary_list.append({
             "الرمز": ticker.replace(".CA", ""),
             "اسم الشركة": name,
-            "السعر": last_close,
-            "أعلى الجلسة": session_high,
-            "أقل الجلسة": session_low,
+            "آخر سعر": last_close,
+            "أعلى الشمعة": bar_high,
+            "أقل الشمعة": bar_low,
             "التغير %": change_pct,
             "الاتجاه": status,
             "حجم التداول": vol_status,
@@ -401,7 +381,7 @@ for ticker, (name, df) in raw_market_data.items():
             "Pivot": pivots["P"],
             "R1": pivots["R1"], "R2": pivots["R2"], "R3": pivots["R3"],
             "المسافة لـ R1 %": dist_to_r1,
-            "تاريخ الجلسة": last_session_date,
+            "توقيت الشمعة": last_bar_time,
             "ticker_full": ticker
         })
 
@@ -428,17 +408,17 @@ selected_short = st.sidebar.selectbox(
 
 st.title("📊 منصة التحليل الفني للبورصة المصرية | EGX Analyzer Pro")
 
-latest_market_date = df_summary["تاريخ الجلسة"].max()
+latest_bar_dt = get_first_row(df_summary)["توقيت الشمعة"]
 st.markdown(f"""
 <div class="timestamp-bar">
-    🕒 <strong>آخر تحديث (توقيت القاهرة):</strong> <span dir="ltr">{last_update_time}</span> &nbsp;|&nbsp; 📅 <strong>أحدث جلسة معروضة:</strong> <span dir="ltr">{latest_market_date}</span> &nbsp;|&nbsp; 📊 <strong>الأسهم المحللة:</strong> {len(df_summary)} سهم
+    📡 <strong>المصدر:</strong> {active_source} &nbsp;|&nbsp; 🕒 <strong>آخر سحب:</strong> <span dir="ltr">{last_update_time}</span> &nbsp;|&nbsp; 🕯️ <strong>آخر شمعة:</strong> <span dir="ltr">{latest_bar_dt}</span> &nbsp;|&nbsp; 📊 <strong>الأسهم:</strong> {len(df_summary)}
 </div>
 """, unsafe_allow_html=True)
 
 hot_stocks = df_summary[(df_summary["نسبة السيولة"] >= 1.5) & (df_summary["الاتجاه"] == "صاعد 🟢")]
 if not hot_stocks.empty:
     hot_list = " ، ".join(hot_stocks["الرمز"].head(8).tolist())
-    st.info(f"🔥 **رادار السيولة المرتفعة:** أسهم صاعدة تشهد تدفق سيولة أعلى من 1.5 ضعف المتوسط: **{hot_list}**")
+    st.info(f"🔥 **رادار السيولة اللحظي (15m):** أسهم صاعدة تشهد تدفق سيولة أعلى من 1.5 ضعف المتوسط: **{hot_list}**")
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "📈 الشارت والمستويات", 
@@ -451,23 +431,23 @@ with tab1:
     row = get_first_row(df_summary[df_summary["الرمز"] == selected_short])
     df_chart = hist_dict[row["ticker_full"]]
     
-    st.subheader(f"📌 {row['اسم الشركة']} ({selected_short}) — جلسة {row['تاريخ الجلسة']}")
+    st.subheader(f"📌 {row['اسم الشركة']} ({selected_short}) — فريم {timeframe_opt}")
     
-    if row["السعر"] > row["Pivot"]:
+    if row["آخر سعر"] > row["Pivot"]:
         st.markdown(f"""
         <div class="trend-bull">
-            📈 اتجاه السهم: <strong>صاعد (إيجابي)</strong> — السعر ({row['السعر']}) أعلى نقطة الارتكاز ({row['Pivot']}) &nbsp;|&nbsp; 📊 الفوليوم: <strong>{row['حجم التداول']}</strong> &nbsp;|&nbsp; ⚡ RSI: <strong>{row['RSI']}</strong> &nbsp;|&nbsp; 💡 {row['الإشارة الفنية']}
+            📈 اتجاه السهم: <strong>صاعد (إيجابي)</strong> — السعر ({row['آخر سعر']}) أعلى نقطة الارتكاز ({row['Pivot']}) &nbsp;|&nbsp; 📊 الفوليوم: <strong>{row['حجم التداول']}</strong> &nbsp;|&nbsp; ⚡ RSI: <strong>{row['RSI']}</strong> &nbsp;|&nbsp; 💡 {row['الإشارة الفنية']}
         </div>
         """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
         <div class="trend-bear">
-            📉 اتجاه السهم: <strong>هابط (سلبي)</strong> — السعر ({row['السعر']}) أدنى نقطة الارتكاز ({row['Pivot']}) &nbsp;|&nbsp; 📊 الفوليوم: <strong>{row['حجم التداول']}</strong> &nbsp;|&nbsp; ⚡ RSI: <strong>{row['RSI']}</strong> &nbsp;|&nbsp; 💡 {row['الإشارة الفنية']}
+            📉 اتجاه السهم: <strong>هابط (سلبي)</strong> — السعر ({row['آخر سعر']}) أدنى نقطة الارتكاز ({row['Pivot']}) &nbsp;|&nbsp; 📊 الفوليوم: <strong>{row['حجم التداول']}</strong> &nbsp;|&nbsp; ⚡ RSI: <strong>{row['RSI']}</strong> &nbsp;|&nbsp; 💡 {row['الإشارة الفنية']}
         </div>
         """, unsafe_allow_html=True)
     
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("السعر الحالي / الإغلاق", f"{row['السعر']} EGP", f"{row['التغير %']}%")
+    c1.metric("آخر سعر", f"{row['آخر سعر']} EGP", f"{row['التغير %']}%")
     c2.metric("نقطة الارتكاز (P)", f"{row['Pivot']}")
     c3.metric("المقاومة R1", f"{row['R1']}", f"+{row['المسافة لـ R1 %']}%")
     c4.metric("المقاومة R2", f"{row['R2']}")
@@ -531,191 +511,9 @@ with tab1:
         xaxis_rangeslider_visible=False,
         showlegend=False
     )
+    fig.update_xaxes(type="category", nticks=12)
     fig.update_yaxes(title_text="السعر (EGP)", row=1, col=1)
     fig.update_yaxes(title_text="الحجم", row=2, col=1)
     fig.update_yaxes(dict(title_text="RSI (14)", range=list((0, 100))), row=3, col=1)
 
     st.plotly_chart(fig, use_container_width=True)
-with tab2:
-    st.subheader(f"📋 رادار البورصة المصرية الشامل ({pivot_method} Pivots)")
-    
-    col_f1, col_f2 = st.columns(2)
-    filter_opt = col_f1.radio("تصفية حسب الاتجاه:", ["الكل", "صاعد 🟢", "هابط 🔴"], horizontal=True)
-    vol_filter = col_f2.radio("تصفية حسب حجم التداول (Volume):", ["جميع الأحجام", "سيولة مرتفعة 🔥 / عالية 📈", "سيولة قليلة 📉"], horizontal=True)
-    
-    table_df = df_summary.drop(columns=["ticker_full", "أعلى الجلسة", "أقل الجلسة", "نسبة السيولة"])
-    if filter_opt != "الكل":
-        table_df = table_df[table_df["الاتجاه"] == filter_opt]
-    if vol_filter == "سيولة مرتفعة 🔥 / عالية 📈":
-        table_df = table_df[table_df["حجم التداول"].str.contains("مرتفع|عالي")]
-    elif vol_filter == "سيولة قليلة 📉":
-        table_df = table_df[table_df["حجم التداول"].str.contains("قليل")]
-
-    def style_table(val):
-        if isinstance(val, str):
-            if "صاعد" in val or "مرتفع" in val or "اختراق" in val: return "color: #16a34a; font-weight: bold;"
-            if "هابط" in val or "سلبي" in val: return "color: #dc2626; font-weight: bold;"
-            if "عالي" in val or "تشبع بيعي" in val: return "color: #2563eb; font-weight: bold;"
-        return ""
-
-    st.dataframe(
-        table_df.style
-        .map(style_table)
-        .background_gradient(subset=["S1", "S2", "S3"], cmap="Greens", low=0.25, high=0.55)
-        .background_gradient(subset=["R1", "R2", "R3"], cmap="Reds", low=0.25, high=0.55)
-        .format(precision=2),
-        use_container_width=True,
-        hide_index=True
-    )
-
-with tab3:
-    st.subheader(f"🧮 تسجيل صفقة جديدة ومتابعتها لسهم {selected_short}")
-    row = get_first_row(df_summary[df_summary["الرمز"] == selected_short])
-    
-    col_in1, col_in2, col_in3 = st.columns(3)
-    entry_price = col_in1.number_input("سعر الشراء (EGP):", value=float(row["السعر"]), step=0.05)
-    stop_loss = col_in2.number_input("سعر وقف الخسارة (مقترح S1):", value=float(row["S1"]), step=0.05)
-    target_price = col_in3.number_input("سعر الهدف (مقترح R1):", value=float(row["R1"]), step=0.05)
-
-    risk = entry_price - stop_loss
-    reward = target_price - entry_price
-
-    st.markdown("---")
-    if risk > 0 and reward > 0:
-        rr_ratio = round(reward / risk, 2)
-        risk_pct = round((risk / entry_price) * 100, 2)
-        reward_pct = round((reward / entry_price) * 100, 2)
-        
-        m1, m2, m3 = st.columns(3)
-        m1.metric("نسبة المخاطرة (Risk)", f"-{risk_pct}%", f"-{round(risk, 2)} EGP", delta_color="inverse")
-        m2.metric("العائد المتوقع (Reward)", f"+{reward_pct}%", f"+{round(reward, 2)} EGP")
-        m3.metric("نسبة العائد للمخاطرة (R:R)", f"1 : {rr_ratio}", "ممتازة" if rr_ratio >= 2 else "متوسطة")
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("💾 حفظ الصفقة في التقرير لمتابعتها مع التحديثات", type="primary", use_container_width=True):
-            save_trade(selected_short, row["اسم الشركة"], entry_price, stop_loss, target_price)
-            cairo_tz = pytz.timezone("Africa/Cairo")
-            st.success(f"تم حفظ صفقة **{selected_short}** بتوقيت ({datetime.now(cairo_tz).strftime('%Y-%m-%d %H:%M')})! انتقل إلى تبويب **(📑 تقرير سجل الصفقات)** للمتابعة.")
-    else:
-        st.warning("تأكد من أن سعر الهدف أعلى من سعر الشراء، وسعر وقف الخسارة أقل من سعر الشراء.")
-
-with tab4:
-    st.subheader("📑 التقرير الإحصائي الشامل للصفقات المسجلة")
-    trades_df = load_trades()
-
-    if trades_df.empty:
-        st.info("لا توجد صفقات مسجلة حتى الآن. يمكنك تسجيل صفقاتك من تبويب **(🧮 إضافة صفقة جديدة)**.")
-    else:
-        evaluated_rows = []
-        wins_count = 0
-        losses_count = 0
-        open_count = 0
-
-        for _, t_row in trades_df.iterrows():
-            sym = str(t_row["الرمز"])
-            full_sym = f"{sym}.CA" if not sym.endswith(".CA") else sym
-            entry_dt = pd.to_datetime(t_row["تاريخ الإضافة"])
-            entry_date_only = entry_dt.date()
-            
-            entry = float(t_row["سعر الشراء"])
-            sl = float(t_row["وقف الخسارة"])
-            target = float(t_row["الهدف"])
-            
-            status_label = "مفتوحة (جارية) ⏳"
-            curr_p = entry
-
-            if full_sym in hist_dict:
-                stock_df = hist_dict[full_sym].copy()
-                stock_df.index = stock_df.index.tz_localize(None)
-                curr_p = round(float(stock_df.iloc[-1]["Close"]), 2)
-                
-                future_sessions = stock_df[stock_df.index.date > entry_date_only]
-                
-                if not future_sessions.empty:
-                    for _, s_row in future_sessions.iterrows():
-                        if float(s_row["Low"]) <= sl:
-                            status_label = "خاسرة (وقف خسارة) ❌"
-                            break
-                        elif float(s_row["High"]) >= target:
-                            status_label = "ناجحة (تحقق الهدف) ✅"
-                            break
-                else:
-                    if curr_p != entry:
-                        if curr_p >= target:
-                            status_label = "ناجحة (تحقق الهدف) ✅"
-                        elif curr_p <= sl:
-                            status_label = "خاسرة (وقف خسارة) ❌"
-
-            if "ناجحة" in status_label:
-                wins_count += 1
-            elif "خاسرة" in status_label:
-                losses_count += 1
-            else:
-                open_count += 1
-
-            current_pnl_pct = round(((curr_p - entry) / entry) * 100, 2)
-
-            evaluated_rows.append({
-                "تاريخ ووقت الإضافة": t_row["تاريخ الإضافة"],
-                "الرمز": sym,
-                "اسم الشركة": t_row["اسم الشركة"],
-                "سعر الشراء": entry,
-                "وقف الخسارة": sl,
-                "الهدف": target,
-                "السعر الحالي": curr_p,
-                "العائد الحالي %": current_pnl_pct,
-                "حالة الصفقة": status_label
-            })
-
-        total_trades = len(evaluated_rows)
-        closed_trades = wins_count + losses_count
-        win_rate_total = round((wins_count / total_trades) * 100, 1) if total_trades > 0 else 0.0
-        loss_rate_total = round((losses_count / total_trades) * 100, 1) if total_trades > 0 else 0.0
-        win_rate_closed = round((wins_count / closed_trades) * 100, 1) if closed_trades > 0 else 0.0
-
-        k1, k2, k3, k4, k5, k6 = st.columns(6)
-        k1.metric("إجمالي الصفقات", f"{total_trades}")
-        k2.metric("صفقات ناجحة ✅", f"{wins_count}", f"{win_rate_total}% من الإجمالي")
-        k3.metric("صفقات خاسرة ❌", f"{losses_count}", f"-{loss_rate_total}% من الإجمالي", delta_color="inverse")
-        k4.metric("صفقات مفتوحة ⏳", f"{open_count}")
-        k5.metric("نسبة النجاح (المغلقة)", f"{win_rate_closed}%")
-        k6.metric("نسبة الخسارة (المغلقة)", f"{round(100 - win_rate_closed, 1) if closed_trades > 0 else 0.0}%")
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        eval_df = pd.DataFrame(evaluated_rows)
-
-        def style_trade_status(val):
-            if isinstance(val, str):
-                if "ناجحة" in val: return "color: #16a34a; font-weight: bold;"
-                if "خاسرة" in val: return "color: #dc2626; font-weight: bold;"
-                if "مفتوحة" in val: return "color: #d97706; font-weight: bold;"
-            return ""
-
-        st.dataframe(
-            eval_df.style
-            .map(style_trade_status, subset=["حالة الصفقة"])
-            .format(precision=2),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        col_btn1, col_btn2 = st.columns(2)
-        csv_export = eval_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-        col_btn1.download_button(
-            label="📥 تحميل التقرير بصيغة Excel / CSV",
-            data=csv_export,
-            file_name=f"EGX_Trades_Report_{datetime.now().strftime('%Y-%m-%d')}.csv",
-            mime="text/csv"
-        )
-        if col_btn2.button("🗑️ مسح سجل الصفقات بالكامل"):
-            if os.path.exists(TRADES_FILE):
-                os.remove(TRADES_FILE)
-            st.rerun()
-
-st.markdown("""
-<div class="disclaimer-box">
-    ⚠️ <strong>إخلاء مسؤولية (Disclaimer):</strong><br>
-    جميع البيانات والمستويات السعرية ومؤشرات التحليل الفني المعروضة في منصة <strong>EGX Analyzer Pro</strong> هي لأغراض تعليمية واسترشادية فقط، ولا تُعد بأي حال من الأحوال توصية مباشرة بالبيع أو الشراء. التداول في سوق الأوراق المالية ينطوي على مخاطر عالية، وقرارك الاستثماري هو مسؤوليتك الشخصية الكاملة.
-</div>
-""", unsafe_allow_html=True)
