@@ -117,8 +117,6 @@ EGX_STOCKS = {
     "HELI.CA": "مصر الجديدة للإسكان والتعمير",
     "PHDC.CA": "بالم هيلز للتعمير",
     "EFIH.CA": "إي فاينانس للاستثمارات المالية",
-    "EKHO.CA": "القابضة المصرية الكويتية (دولار)",
-    "EKHOA.CA": "القابضة المصرية الكويتية (جنيه)",
     "AMOC.CA": "الإسكندرية للزيوت المعدنية (أموك)",
     "SKPC.CA": "سيدي كرير للبتروكيماويات",
     "ISPH.CA": "ابن سينا فارما",
@@ -285,7 +283,7 @@ def fetch_all_stocks_parallel(tickers_dict, timeframe_choice="15m"):
             
         return ticker, None
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         for ticker, data in executor.map(fetch_single, tickers_dict.items()):
             if data is not None:
                 results[ticker] = data
@@ -293,7 +291,7 @@ def fetch_all_stocks_parallel(tickers_dict, timeframe_choice="15m"):
     return results, fetch_time
 st.sidebar.title("⚡ EGX Analyzer Pro")
 
-if st.sidebar.button("🔄 تحديث الأسعار الآن (Refresh)", use_container_width=True, type="primary"):
+if st.sidebar.button("🔄 تحديث الأسعار الآن (Refresh)", width="stretch", type="primary"):
     st.cache_data.clear()
     st.rerun()
 
@@ -320,7 +318,7 @@ if pivot_method == "Classic":
 else:
     st.sidebar.markdown("""
     <div class="info-card-sidebar">
-        <strong>📙 معادلة فيبوناتشي (Fibonacci):</strong><br>
+        <strong>📙 المعادلة فيبوناتشي (Fibonacci):</strong><br>
         تعتمد على النسب الذهبية (<strong>38.2%</strong>، <strong>61.8%</strong>، <strong>100%</strong>) من مدى حركة السعر؛ تعطي مستويات ارتداد أكثر دقة وهدوءاً في الأسهم ذات التذبذب العالي.
     </div>
     """, unsafe_allow_html=True)
@@ -554,10 +552,10 @@ with tab1:
     fig.update_yaxes(title_text="الحجم", row=2, col=1)
     fig.update_yaxes(dict(title_text="RSI (14)", range=list((0, 100))), row=3, col=1)
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 with tab2:
     st.subheader(f"📋 رادار البورصة المصرية الشامل ({pivot_method} Pivots — {timeframe_opt})")
-    st.caption("💡 **تلميح:** اضغط على أي صف أو رمز سهم في الجدول بالأسفل لاختياره فوراً وعرض تحليله في الشارت وحاسبة الصفقات.")
+    st.caption("💡 **تلميح:** اضغط على أي صف في الجدول بالأسفل لاختيار السهم فوراً وعرض تحليله في الشارت وحاسبة الصفقات.")
     
     col_f1, col_f2 = st.columns(2)
     filter_opt = col_f1.radio("تصفية حسب الاتجاه:", ["الكل", "صاعد 🟢", "هابط 🔴"], horizontal=True)
@@ -584,19 +582,23 @@ with tab2:
         .background_gradient(subset=["S1", "S2", "S3"], cmap="Greens", low=0.25, high=0.55)
         .background_gradient(subset=["R1", "R2", "R3"], cmap="Reds", low=0.25, high=0.55)
         .format(precision=2),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
         key="radar_table_select"
     )
 
-    if event and len(event.selection.rows) > 0:
-        selected_row_idx = get_first_item(event.selection.rows, 0)
-        clicked_ticker = get_row_at(table_df, selected_row_idx)["الرمز"]
-        if clicked_ticker != st.session_state["active_symbol"]:
-            st.session_state["active_symbol"] = clicked_ticker
-            st.rerun()
+    try:
+        selected_rows_list = list(event.selection.rows)
+        if len(selected_rows_list) > 0:
+            selected_row_idx = int(get_first_item(selected_rows_list, 0))
+            clicked_ticker = str(get_row_at(table_df, selected_row_idx)["الرمز"])
+            if clicked_ticker != st.session_state["active_symbol"]:
+                st.session_state["active_symbol"] = clicked_ticker
+                st.rerun()
+    except Exception:
+        pass
 
 with tab3:
     st.subheader(f"🧮 تسجيل صفقة جديدة ومتابعتها لسهم {selected_short}")
@@ -606,11 +608,11 @@ with tab3:
     
     valid_supports = [float(row["S1"]), float(row["S2"]), float(row["S3"])]
     below_supports = [s for s in valid_supports if s < curr_price_val]
-    default_sl = get_first_item(below_supports, round(curr_price_val * 0.98, 2))
+    default_sl = float(get_first_item(below_supports, round(curr_price_val * 0.98, 2)))
 
     valid_resistances = [float(row["Pivot"]), float(row["R1"]), float(row["R2"]), float(row["R3"])]
     above_resistances = [r for r in valid_resistances if r > curr_price_val]
-    default_target = get_first_item(above_resistances, round(curr_price_val * 1.03, 2))
+    default_target = float(get_first_item(above_resistances, round(curr_price_val * 1.03, 2)))
     
     col_in1, col_in2, col_in3 = st.columns(3)
     entry_price = col_in1.number_input("سعر الشراء (EGP):", value=curr_price_val, step=0.05, key=f"entry_{selected_short}")
@@ -632,7 +634,7 @@ with tab3:
         m3.metric("نسبة العائد للمخاطرة (R:R)", f"1 : {rr_ratio}", "ممتازة" if rr_ratio >= 2 else "متوسطة")
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("💾 حفظ الصفقة في التقرير لمتابعتها مع التحديثات", type="primary", use_container_width=True):
+        if st.button("💾 حفظ الصفقة في التقرير لمتابعتها مع التحديثات", type="primary", width="stretch"):
             save_trade(selected_short, row["اسم الشركة"], entry_price, stop_loss, target_price)
             st.success(f"تم حفظ صفقة **{selected_short}** بتوقيت ({datetime.now().strftime('%Y-%m-%d %H:%M')})! انتقل إلى تبويب **(📑 تقرير سجل الصفقات)** للمتابعة.")
     else:
@@ -735,7 +737,7 @@ with tab4:
             eval_df.style
             .map(style_trade_status, subset=["حالة الصفقة"])
             .format(precision=2),
-            use_container_width=True,
+            width="stretch",
             hide_index=True
         )
 
