@@ -68,6 +68,16 @@ st.markdown("""
         margin-top: 8px;
         margin-bottom: 12px;
     }
+    .t0-rules-box {
+        background-color: rgba(16, 185, 129, 0.08);
+        border: 1px solid rgba(16, 185, 129, 0.35);
+        border-right: 5px solid #10b981;
+        padding: 14px 18px;
+        border-radius: 8px;
+        font-size: 13.5px;
+        line-height: 1.8;
+        margin-top: 15px;
+    }
     .trend-bull {
         background-color: rgba(22, 163, 74, 0.12);
         border: 1px solid #16a34a;
@@ -318,7 +328,7 @@ if pivot_method == "Classic":
 else:
     st.sidebar.markdown("""
     <div class="info-card-sidebar">
-        <strong>📙 المعادلة فيبوناتشي (Fibonacci):</strong><br>
+        <strong>📙 معادلة فيبوناتشي (Fibonacci):</strong><br>
         تعتمد على النسب الذهبية (<strong>38.2%</strong>، <strong>61.8%</strong>، <strong>100%</strong>) من مدى حركة السعر؛ تعطي مستويات ارتداد أكثر دقة وهدوءاً في الأسهم ذات التذبذب العالي.
     </div>
     """, unsafe_allow_html=True)
@@ -360,6 +370,7 @@ for ticker, (name, df_intra, df_day, src_used) in raw_market_data.items():
         last_close = round(float(curr_bar['Close']), 2)
         change_pct = round(((last_close - float(prev_day['Close'])) / float(prev_day['Close'])) * 100, 2)
         dist_to_r1 = round(((pivots["R1"] - last_close) / last_close) * 100, 2)
+        dist_from_pivot = round(((last_close - pivots["P"]) / pivots["P"]) * 100, 2)
         rsi_val = round(float(curr_bar['RSI']), 1) if pd.notna(curr_bar['RSI']) else 50.0
         
         vol_curr = float(curr_bar['Volume'])
@@ -402,6 +413,7 @@ for ticker, (name, df_intra, df_day, src_used) in raw_market_data.items():
             "Pivot": pivots["P"],
             "R1": pivots["R1"], "R2": pivots["R2"], "R3": pivots["R3"],
             "نسبة السيولة": vol_ratio,
+            "البعد عن الارتكاز %": dist_from_pivot,
             "توقيت الشمعة": last_bar_time,
             "ticker_full": ticker
         })
@@ -456,8 +468,9 @@ if not hot_stocks.empty:
     hot_list = " ، ".join(hot_stocks["الرمز"].head(8).tolist())
     st.info(f"🔥 **رادار السيولة اللحظي (15m):** أسهم صاعدة تشهد تدفق سيولة أعلى من 1.5 ضعف المتوسط: **{hot_list}**")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📈 الشارت والمستويات", 
+    "⚡ رادار صفقات T+0 السريعة",
     "📋 رادار السوق (Pivot & Volume)", 
     "🧮 إضافة صفقة جديدة", 
     "📑 تقرير سجل الصفقات"
@@ -554,6 +567,109 @@ with tab1:
 
     st.plotly_chart(fig, width="stretch")
 with tab2:
+    st.subheader("⚡ رادار المضاربة اللحظية السريعة (T+0 Scalping Radar)")
+    st.caption("فرز تلقائي لفرص الجلسة الواحدة بناءً على السيولة، القرب من الارتكاز، ومؤشر القوة النسبية (RSI).")
+
+    # 1. استراتيجية الاختراق والزخم
+    st.markdown("### 1️⃣ أفضل الخيارات الفنية (T+0) — استراتيجية الاختراق والزخم (Breakout & Momentum)")
+    t0_momentum_df = df_summary[
+        (df_summary["الاتجاه"] == "صاعد 🟢") &
+        (df_summary["نسبة السيولة"] >= 1.0) &
+        (df_summary["RSI"] < 68)
+    ].sort_values(by="نسبة السيولة", ascending=False).head(6)
+
+    if t0_momentum_df.empty:
+        st.info("لا توجد أسهم صاعدة بسيولة أعلى من المتوسط (1.0x) حالياً في هذه الجلسة.")
+    else:
+        mom_rows = []
+        for _, m_row in t0_momentum_df.iterrows():
+            target_lvl = m_row["R1"] if m_row["آخر سعر"] < m_row["R1"] else m_row["R2"]
+            stop_lvl = m_row["Pivot"] if m_row["آخر سعر"] > m_row["Pivot"] else m_row["S1"]
+            mom_rows.append({
+                "الرمز": m_row["الرمز"],
+                "اسم الشركة": m_row["اسم الشركة"],
+                "آخر سعر": m_row["آخر سعر"],
+                "حجم التداول": m_row["حجم التداول"],
+                "RSI": m_row["RSI"],
+                "الهدف اللحظي": target_lvl,
+                "وقف الخسارة": stop_lvl,
+                "التقييم الفني": "زخم صاعد بسيولة نشطة؛ مناسب للدخول السريع مع الالتزام بالوقف."
+            })
+        st.dataframe(pd.DataFrame(mom_rows).style.format(precision=2), width="stretch", hide_index=True)
+
+    st.markdown("---")
+
+    # 2. استراتيجية الارتداد من الارتكاز
+    st.markdown("### 2️⃣ أفضل الخيارات الفنية (T+0) — استراتيجية الارتداد الآمن من الارتكاز (Pivot Bounce)")
+    t0_bounce_df = df_summary[
+        (df_summary["الاتجاه"] == "صاعد 🟢") &
+        (df_summary["البعد عن الارتكاز %"] >= 0.0) &
+        (df_summary["البعد عن الارتكاز %"] <= 2.2) &
+        (df_summary["RSI"] >= 40) &
+        (df_summary["RSI"] <= 62) &
+        (df_summary["التغير %"] >= 0)
+    ].sort_values(by="البعد عن الارتكاز %", ascending=True).head(6)
+
+    if t0_bounce_df.empty:
+        st.info("لا توجد أسهم قريبة من نقطة الارتكاز بشروط الأمان المثالية حالياً.")
+    else:
+        bounce_rows = []
+        for _, b_row in t0_bounce_df.iterrows():
+            target_b = b_row["R1"] if b_row["آخر سعر"] < b_row["R1"] else b_row["R2"]
+            stop_b = b_row["S1"]
+            bounce_rows.append({
+                "الرمز": b_row["الرمز"],
+                "اسم الشركة": b_row["اسم الشركة"],
+                "آخر سعر": b_row["آخر سعر"],
+                "نقطة الارتكاز": b_row["Pivot"],
+                "البعد عن الارتكاز %": b_row["البعد عن الارتكاز %"],
+                "RSI": b_row["RSI"],
+                "الهدف (R1/R2)": target_b,
+                "وقف الخسارة (S1)": stop_b,
+                "التقييم الفني": f"مخاطرة منخفضة (أعلى الارتكاز بـ {b_row['البعد عن الارتكاز %']}%)؛ ارتداد متزن."
+            })
+        st.dataframe(pd.DataFrame(bounce_rows).style.format(precision=2), width="stretch", hide_index=True)
+
+    st.markdown("---")
+
+    # 3. أسهم يُفضل تجنبها في T+0
+    st.markdown("### 3️⃣ أسهم يُفضل تجنبها في الـ T+0 حالياً (رغم صعودها)")
+    avoid_df = df_summary[
+        (df_summary["الاتجاه"] == "صاعد 🟢") &
+        ((df_summary["نسبة السيولة"] < 0.45) | (df_summary["RSI"] >= 68) | (df_summary["التغير %"] < 0))
+    ].head(8)
+
+    if not avoid_df.empty:
+        avoid_rows = []
+        for _, a_row in avoid_df.iterrows():
+            reasons = []
+            if a_row["نسبة السيولة"] < 0.45:
+                reasons.append(f"سيولة ضعيفة جداً ({a_row['نسبة السيولة']}x) تصعّب الخروج السريع")
+            if a_row["RSI"] >= 68:
+                reasons.append(f"تشبع شرائي مرتفع (RSI = {a_row['RSI']})")
+            if a_row["التغير %"] < 0:
+                reasons.append(f"تغير لحظي سلبي ({a_row['التغير %']}%)")
+            avoid_rows.append({
+                "الرمز": a_row["الرمز"],
+                "اسم الشركة": a_row["اسم الشركة"],
+                "آخر سعر": a_row["آخر سعر"],
+                "حجم التداول": a_row["حجم التداول"],
+                "RSI": a_row["RSI"],
+                "سبب التجنب في T+0": " + ".join(reasons)
+            })
+        st.dataframe(pd.DataFrame(avoid_rows).style.format(precision=2), width="stretch", hide_index=True)
+
+    st.markdown("""
+    <div class="t0-rules-box">
+        <strong>📌 الخلاصة وقواعد المضاربة اللحظية (T+0) على هذه الشاشة:</strong><br>
+        1. <strong>قاعدة السيولة أولاً:</strong> في السوق المصري، السهم ذو الفوليوم الأقل من <code>0.7x</code> قد يرتفع بصفقات صغيرة لكنه يحبس المضارب عند البيع؛ امنح الأولوية دائماً للأسهم ذات السيولة الأعلى.<br>
+        2. <strong>قاعدة القرب من الارتكاز:</strong> أفضل نقطة دخول في صفقات الارتداد هي عندما يكون السعر قريباً جداً من <code>Pivot</code> (فارق أقل من <code>1.5%</code>) ليكون وقف الخسارة قريباً ومحدداً.<br>
+        3. <strong>قاعدة RSI المثالي:</strong> استهدف الأسهم التي يتراوح فيها <code>RSI</code> بين <strong>45 و 60</strong>، وتجنب الدخول الجديد عندما يتجاوز <strong>68</strong>.<br>
+        4. <strong>الانضباط اللحظي:</strong> لا تحوّل صفقة <code>T+0</code> خاسرة إلى استثمار طويل الأجل؛ كسر مستوى الارتكاز أو الدعم المحدد هو إشارة خروج فورية.
+    </div>
+    """, unsafe_allow_html=True)
+
+with tab3:
     st.subheader(f"📋 رادار البورصة المصرية الشامل ({pivot_method} Pivots — {timeframe_opt})")
     st.caption("💡 **تلميح:** اضغط على أي صف في الجدول بالأسفل لاختيار السهم فوراً وعرض تحليله في الشارت وحاسبة الصفقات.")
     
@@ -561,7 +677,7 @@ with tab2:
     filter_opt = col_f1.radio("تصفية حسب الاتجاه:", ["الكل", "صاعد 🟢", "هابط 🔴"], horizontal=True)
     vol_filter = col_f2.radio("تصفية حسب حجم التداول (Volume):", ["جميع الأحجام", "سيولة مرتفعة 🔥 / عالية 📈", "سيولة قليلة 📉"], horizontal=True)
     
-    table_df = df_summary.drop(columns=["ticker_full", "توقيت الشمعة", "نسبة السيولة"]).reset_index(drop=True)
+    table_df = df_summary.drop(columns=["ticker_full", "توقيت الشمعة", "نسبة السيولة", "البعد عن الارتكاز %"]).reset_index(drop=True)
     if filter_opt != "الكل":
         table_df = table_df[table_df["الاتجاه"] == filter_opt].reset_index(drop=True)
     if vol_filter == "سيولة مرتفعة 🔥 / عالية 📈":
@@ -599,8 +715,7 @@ with tab2:
                 st.rerun()
     except Exception:
         pass
-
-with tab3:
+with tab4:
     st.subheader(f"🧮 تسجيل صفقة جديدة ومتابعتها لسهم {selected_short}")
     row = get_row_at(df_summary[df_summary["الرمز"] == selected_short], 0)
     
@@ -640,7 +755,7 @@ with tab3:
     else:
         st.warning("تأكد من أن سعر الهدف أعلى من سعر الشراء، وسعر وقف الخسارة أقل من سعر الشراء.")
 
-with tab4:
+with tab5:
     st.subheader("📑 التقرير الإحصائي الشامل للصفقات المسجلة")
     trades_df = load_trades()
 
