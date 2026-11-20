@@ -434,6 +434,7 @@ if custom_ticker:
     clean_custom = custom_ticker.replace(".CA", "")
     if clean_custom in symbols_list and st.session_state.get("last_custom") != clean_custom:
         st.session_state["active_symbol"] = clean_custom
+        st.session_state["sidebar_stock_select"] = clean_custom
         st.session_state["last_custom"] = clean_custom
 
 if st.session_state["active_symbol"] not in symbols_list:
@@ -566,9 +567,31 @@ with tab1:
     fig.update_yaxes(dict(title_text="RSI (14)", range=list((0, 100))), row=3, col=1)
 
     st.plotly_chart(fig, width="stretch")
+def render_interactive_table(df_to_show, table_key, styler_obj=None):
+    target_obj = styler_obj if styler_obj is not None else df_to_show.style.format(precision=2)
+    event = st.dataframe(
+        target_obj,
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=table_key
+    )
+    try:
+        selected_rows_list = list(event.selection.rows)
+        if len(selected_rows_list) > 0:
+            selected_row_idx = int(get_first_item(selected_rows_list, 0))
+            clicked_ticker = str(get_row_at(df_to_show, selected_row_idx)["الرمز"])
+            if clicked_ticker != st.session_state["active_symbol"]:
+                st.session_state["active_symbol"] = clicked_ticker
+                st.session_state["sidebar_stock_select"] = clicked_ticker
+                st.rerun()
+    except Exception:
+        pass
+
 with tab2:
     st.subheader("⚡ رادار المضاربة اللحظية السريعة (T+0 Scalping Radar)")
-    st.caption("فرز تلقائي لفرص الجلسة الواحدة بناءً على السيولة، القرب من الارتكاز، ومؤشر القوة النسبية (RSI).")
+    st.caption("💡 **تلميح:** اضغط على أي صف أو رمز سهم في الجداول بالأسفل ليتم اختياره تلقائياً في القائمة الجانبية وعرض كل بياناته وشارته.")
 
     # 1. استراتيجية الاختراق والزخم
     st.markdown("### 1️⃣ أفضل الخيارات الفنية (T+0) — استراتيجية الاختراق والزخم (Breakout & Momentum)")
@@ -595,7 +618,8 @@ with tab2:
                 "وقف الخسارة": stop_lvl,
                 "التقييم الفني": "زخم صاعد بسيولة نشطة؛ مناسب للدخول السريع مع الالتزام بالوقف."
             })
-        st.dataframe(pd.DataFrame(mom_rows).style.format(precision=2), width="stretch", hide_index=True)
+        mom_df_clean = pd.DataFrame(mom_rows).reset_index(drop=True)
+        render_interactive_table(mom_df_clean, "t0_mom_table")
 
     st.markdown("---")
 
@@ -628,7 +652,8 @@ with tab2:
                 "وقف الخسارة (S1)": stop_b,
                 "التقييم الفني": f"مخاطرة منخفضة (أعلى الارتكاز بـ {b_row['البعد عن الارتكاز %']}%)؛ ارتداد متزن."
             })
-        st.dataframe(pd.DataFrame(bounce_rows).style.format(precision=2), width="stretch", hide_index=True)
+        bounce_df_clean = pd.DataFrame(bounce_rows).reset_index(drop=True)
+        render_interactive_table(bounce_df_clean, "t0_bounce_table")
 
     st.markdown("---")
 
@@ -657,7 +682,8 @@ with tab2:
                 "RSI": a_row["RSI"],
                 "سبب التجنب في T+0": " + ".join(reasons)
             })
-        st.dataframe(pd.DataFrame(avoid_rows).style.format(precision=2), width="stretch", hide_index=True)
+        avoid_df_clean = pd.DataFrame(avoid_rows).reset_index(drop=True)
+        render_interactive_table(avoid_df_clean, "t0_avoid_table")
 
     st.markdown("""
     <div class="t0-rules-box">
@@ -671,7 +697,7 @@ with tab2:
 
 with tab3:
     st.subheader(f"📋 رادار البورصة المصرية الشامل ({pivot_method} Pivots — {timeframe_opt})")
-    st.caption("💡 **تلميح:** اضغط على أي صف في الجدول بالأسفل لاختيار السهم فوراً وعرض تحليله في الشارت وحاسبة الصفقات.")
+    st.caption("💡 **تلميح:** اضغط على أي صف في الجدول بالأسفل ليتم اختيار السهم تلقائياً في القائمة الجانبية وعرض كل بياناته وشارته.")
     
     col_f1, col_f2 = st.columns(2)
     filter_opt = col_f1.radio("تصفية حسب الاتجاه:", ["الكل", "صاعد 🟢", "هابط 🔴"], horizontal=True)
@@ -692,29 +718,15 @@ with tab3:
             if "عالي" in val or "تشبع بيعي" in val: return "color: #2563eb; font-weight: bold;"
         return ""
 
-    event = st.dataframe(
+    radar_styler = (
         table_df.style
         .map(style_table)
         .background_gradient(subset=["S1", "S2", "S3"], cmap="Greens", low=0.25, high=0.55)
         .background_gradient(subset=["R1", "R2", "R3"], cmap="Reds", low=0.25, high=0.55)
-        .format(precision=2),
-        width="stretch",
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key="radar_table_select"
+        .format(precision=2)
     )
+    render_interactive_table(table_df, "radar_table_select", radar_styler)
 
-    try:
-        selected_rows_list = list(event.selection.rows)
-        if len(selected_rows_list) > 0:
-            selected_row_idx = int(get_first_item(selected_rows_list, 0))
-            clicked_ticker = str(get_row_at(table_df, selected_row_idx)["الرمز"])
-            if clicked_ticker != st.session_state["active_symbol"]:
-                st.session_state["active_symbol"] = clicked_ticker
-                st.rerun()
-    except Exception:
-        pass
 with tab4:
     st.subheader(f"🧮 تسجيل صفقة جديدة ومتابعتها لسهم {selected_short}")
     row = get_row_at(df_summary[df_summary["الرمز"] == selected_short], 0)
