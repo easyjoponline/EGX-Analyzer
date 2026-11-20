@@ -112,7 +112,6 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
 EGX_STOCKS = {
     "COMI.CA": "البنك التجاري الدولي (CIB)",
     "TMGH.CA": "مجموعة طلعت مصطفى القابضة",
@@ -434,7 +433,6 @@ if custom_ticker:
     clean_custom = custom_ticker.replace(".CA", "")
     if clean_custom in symbols_list and st.session_state.get("last_custom") != clean_custom:
         st.session_state["active_symbol"] = clean_custom
-        st.session_state["sidebar_stock_select"] = clean_custom
         st.session_state["last_custom"] = clean_custom
 
 if st.session_state["active_symbol"] not in symbols_list:
@@ -442,17 +440,16 @@ if st.session_state["active_symbol"] not in symbols_list:
 
 name_map = dict(zip(df_summary["الرمز"], df_summary["اسم الشركة"]))
 
-def on_sidebar_change():
-    st.session_state["active_symbol"] = st.session_state["sidebar_stock_select"]
-
-st.sidebar.selectbox(
+sidebar_choice = st.sidebar.selectbox(
     f"📈 اختر السهم ({len(df_summary)} سهم متاح):",
     options=symbols_list,
     index=symbols_list.index(st.session_state["active_symbol"]),
-    format_func=lambda x: f"{x} - {name_map.get(x, '')}",
-    key="sidebar_stock_select",
-    on_change=on_sidebar_change
+    format_func=lambda x: f"{x} - {name_map.get(x, '')}"
 )
+
+if sidebar_choice != st.session_state["active_symbol"]:
+    st.session_state["active_symbol"] = sidebar_choice
+    st.rerun()
 
 selected_short = st.session_state["active_symbol"]
 st.title("📊 منصة التحليل الفني للبورصة المصرية | EGX Analyzer Pro")
@@ -584,16 +581,39 @@ def render_interactive_table(df_to_show, table_key, styler_obj=None):
             clicked_ticker = str(get_row_at(df_to_show, selected_row_idx)["الرمز"])
             if clicked_ticker != st.session_state["active_symbol"]:
                 st.session_state["active_symbol"] = clicked_ticker
-                st.session_state["sidebar_stock_select"] = clicked_ticker
                 st.rerun()
     except Exception:
         pass
 
 with tab2:
     st.subheader("⚡ رادار المضاربة اللحظية السريعة (T+0 Scalping Radar)")
-    st.caption("💡 **تلميح:** اضغط على أي صف أو رمز سهم في الجداول بالأسفل ليتم اختياره تلقائياً في القائمة الجانبية وعرض كل بياناته وشارته.")
+    st.caption("💡 **تلميح:** اضغط على أي صف في الجداول بالأسفل ليتم اختيار السهم تلقائياً في القائمة الجانبية، أو احفظ صفقته مباشرة من شريط التنفيذ السريع بالأسفل.")
 
-    # 1. استراتيجية الاختراق والزخم
+    active_t0_row = get_row_at(df_summary[df_summary["الرمز"] == selected_short], 0)
+    t0_entry = float(active_t0_row["آخر سعر"])
+    t0_target = float(active_t0_row["R1"]) if t0_entry < float(active_t0_row["R1"]) else float(active_t0_row["R2"])
+    if t0_target <= t0_entry:
+        t0_target = round(t0_entry * 1.02, 2)
+    t0_sl = float(active_t0_row["Pivot"]) if t0_entry > float(active_t0_row["Pivot"]) else float(active_t0_row["S1"])
+    if t0_sl >= t0_entry:
+        t0_sl = round(t0_entry * 0.985, 2)
+
+    with st.container(border=True):
+        st.markdown(f"**⚡ تنفيذ وحفظ صفقة T+0 سريعة للسهم المحدد: `{selected_short}` — {active_t0_row['اسم الشركة']}**")
+        q1, q2, q3, q4 = st.columns([1.2, 1.2, 1.2, 1.4])
+        q_entry = q1.number_input("سعر الدخول:", value=t0_entry, step=0.05, key=f"t0_e_{selected_short}")
+        q_target = q2.number_input("الهدف اللحظي:", value=t0_target, step=0.05, key=f"t0_t_{selected_short}")
+        q_sl = q3.number_input("وقف الخسارة:", value=t0_sl, step=0.05, key=f"t0_s_{selected_short}")
+        q4.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        if q4.button(f"💾 حفظ صفقة {selected_short} (T+0)", type="primary", width="stretch"):
+            if q_target > q_entry and q_sl < q_entry:
+                save_trade(selected_short, active_t0_row["اسم الشركة"], q_entry, q_sl, q_target)
+                st.success(f"تم حفظ صفقة T+0 لسهم **{selected_short}** في تقرير سجل الصفقات بنجاح!")
+            else:
+                st.error("تأكد أن الهدف أعلى من الدخول والوقف أقل من الدخول.")
+
+    st.markdown("---")
+
     st.markdown("### 1️⃣ أفضل الخيارات الفنية (T+0) — استراتيجية الاختراق والزخم (Breakout & Momentum)")
     t0_momentum_df = df_summary[
         (df_summary["الاتجاه"] == "صاعد 🟢") &
@@ -623,7 +643,6 @@ with tab2:
 
     st.markdown("---")
 
-    # 2. استراتيجية الارتداد من الارتكاز
     st.markdown("### 2️⃣ أفضل الخيارات الفنية (T+0) — استراتيجية الارتداد الآمن من الارتكاز (Pivot Bounce)")
     t0_bounce_df = df_summary[
         (df_summary["الاتجاه"] == "صاعد 🟢") &
@@ -657,7 +676,6 @@ with tab2:
 
     st.markdown("---")
 
-    # 3. أسهم يُفضل تجنبها في T+0
     st.markdown("### 3️⃣ أسهم يُفضل تجنبها في الـ T+0 حالياً (رغم صعودها)")
     avoid_df = df_summary[
         (df_summary["الاتجاه"] == "صاعد 🟢") &
@@ -726,7 +744,6 @@ with tab3:
         .format(precision=2)
     )
     render_interactive_table(table_df, "radar_table_select", radar_styler)
-
 with tab4:
     st.subheader(f"🧮 تسجيل صفقة جديدة ومتابعتها لسهم {selected_short}")
     row = get_row_at(df_summary[df_summary["الرمز"] == selected_short], 0)
