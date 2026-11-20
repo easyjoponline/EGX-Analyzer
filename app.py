@@ -58,6 +58,16 @@ st.markdown("""
         margin-bottom: 12px;
         display: inline-block;
     }
+    .info-card-sidebar {
+        background-color: rgba(59, 130, 246, 0.1);
+        border-right: 4px solid #3b82f6;
+        padding: 10px 12px;
+        border-radius: 6px;
+        font-size: 12.5px;
+        line-height: 1.6;
+        margin-top: 8px;
+        margin-bottom: 12px;
+    }
     .trend-bull {
         background-color: rgba(22, 163, 74, 0.12);
         border: 1px solid #16a34a;
@@ -164,8 +174,13 @@ EGX_STOCKS = {
 }
 TRADES_FILE = "trades_log.csv"
 
-def get_first_row(df_obj):
-    return next(df_obj.iterrows())[1]
+def get_row_at(df_obj, pos=0):
+    target = df_obj.tail(abs(pos)) if pos < 0 else df_obj.iloc[pos:pos+1]
+    _, row_data = next(target.iterrows())
+    return row_data
+
+def get_first_item(seq, fallback=None):
+    return next(iter(seq), fallback)
 
 def load_trades():
     if os.path.exists(TRADES_FILE):
@@ -295,6 +310,21 @@ pivot_method = st.sidebar.selectbox(
     ["Classic", "Fibonacci"]
 )
 
+if pivot_method == "Classic":
+    st.sidebar.markdown("""
+    <div class="info-card-sidebar">
+        <strong>📘 المعادلة الكلاسيكية (Classic):</strong><br>
+        الأكثر استخداماً في المضاربة اليومية بالبورصة المصرية؛ تعتمد على مضاعفة الفارق بين نقطة الارتكاز وأعلى/أدنى سعر لتحديد مستويات اختراق واضحة وسريعة.
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    st.sidebar.markdown("""
+    <div class="info-card-sidebar">
+        <strong>📙 معادلة فيبوناتشي (Fibonacci):</strong><br>
+        تعتمد على النسب الذهبية (<strong>38.2%</strong>، <strong>61.8%</strong>، <strong>100%</strong>) من مدى حركة السعر؛ تعطي مستويات ارتداد أكثر دقة وهدوءاً في الأسهم ذات التذبذب العالي.
+    </div>
+    """, unsafe_allow_html=True)
+
 custom_ticker = st.sidebar.text_input(
     "🔍 بحث سريع عن أي سهم إضافي:",
     placeholder="اكتب رمز السهم واضغط Enter..."
@@ -324,14 +354,12 @@ for ticker, (name, df_intra, df_day, src_used) in raw_market_data.items():
         active_source = src_used
         hist_dict[ticker] = df_intra
         
-        prev_day = df_day.iloc[-2]
-        curr_bar = df_intra.iloc[-1]
-        last_bar_time = df_intra.index[-1].strftime("%Y-%m-%d %H:%M")
+        prev_day = get_row_at(df_day, -2)
+        curr_bar = get_row_at(df_intra, -1)
+        last_bar_time = df_intra.tail(1).index.strftime("%Y-%m-%d %H:%M").tolist().pop()
         
         pivots = calculate_pivots(prev_day['High'], prev_day['Low'], prev_day['Close'], pivot_method)
         last_close = round(float(curr_bar['Close']), 2)
-        bar_high = round(float(curr_bar['High']), 2)
-        bar_low = round(float(curr_bar['Low']), 2)
         change_pct = round(((last_close - float(prev_day['Close'])) / float(prev_day['Close'])) * 100, 2)
         dist_to_r1 = round(((pivots["R1"] - last_close) / last_close) * 100, 2)
         rsi_val = round(float(curr_bar['RSI']), 1) if pd.notna(curr_bar['RSI']) else 50.0
@@ -366,18 +394,16 @@ for ticker, (name, df_intra, df_day, src_used) in raw_market_data.items():
             "الرمز": ticker.replace(".CA", ""),
             "اسم الشركة": name,
             "آخر سعر": last_close,
-            "أعلى الشمعة": bar_high,
-            "أقل الشمعة": bar_low,
             "التغير %": change_pct,
             "الاتجاه": status,
             "حجم التداول": vol_status,
-            "نسبة السيولة": vol_ratio,
             "RSI": rsi_val,
             "الإشارة الفنية": smart_signal,
+            "الهدف R1 %": dist_to_r1,
             "S3": pivots["S3"], "S2": pivots["S2"], "S1": pivots["S1"],
             "Pivot": pivots["P"],
             "R1": pivots["R1"], "R2": pivots["R2"], "R3": pivots["R3"],
-            "المسافة لـ R1 %": dist_to_r1,
+            "نسبة السيولة": vol_ratio,
             "توقيت الشمعة": last_bar_time,
             "ticker_full": ticker
         })
@@ -388,27 +414,42 @@ if df_summary.empty:
     st.error("تعذر تحميل البيانات. تأكد من الاتصال بالإنترنت والمحاولة مرة أخرى.")
     st.stop()
 
-default_index = 0
+symbols_list = df_summary["الرمز"].tolist()
+first_symbol = get_first_item(symbols_list)
+
+if "active_symbol" not in st.session_state:
+    st.session_state["active_symbol"] = first_symbol
+
 if custom_ticker:
     clean_custom = custom_ticker.replace(".CA", "")
-    if clean_custom in df_summary["الرمز"].values:
-        default_index = df_summary["الرمز"].tolist().index(clean_custom)
+    if clean_custom in symbols_list and st.session_state.get("last_custom") != clean_custom:
+        st.session_state["active_symbol"] = clean_custom
+        st.session_state["last_custom"] = clean_custom
+
+if st.session_state["active_symbol"] not in symbols_list:
+    st.session_state["active_symbol"] = first_symbol
 
 name_map = dict(zip(df_summary["الرمز"], df_summary["اسم الشركة"]))
 
-selected_short = st.sidebar.selectbox(
+def on_sidebar_change():
+    st.session_state["active_symbol"] = st.session_state["sidebar_stock_select"]
+
+st.sidebar.selectbox(
     f"📈 اختر السهم ({len(df_summary)} سهم متاح):",
-    options=df_summary["الرمز"].tolist(),
-    index=default_index,
-    format_func=lambda x: f"{x} - {name_map.get(x, '')}"
+    options=symbols_list,
+    index=symbols_list.index(st.session_state["active_symbol"]),
+    format_func=lambda x: f"{x} - {name_map.get(x, '')}",
+    key="sidebar_stock_select",
+    on_change=on_sidebar_change
 )
 
+selected_short = st.session_state["active_symbol"]
 st.title("📊 منصة التحليل الفني للبورصة المصرية | EGX Analyzer Pro")
 
-latest_bar_dt = get_first_row(df_summary)["توقيت الشمعة"]
+latest_bar_dt = get_row_at(df_summary, 0)["توقيت الشمعة"]
 st.markdown(f"""
 <div class="timestamp-bar">
-    📡 <strong>المصدر:</strong> {active_source} &nbsp;|&nbsp; 🕒 <strong>آخر سحب:</strong> <span dir="ltr">{last_update_time}</span> &nbsp;|&nbsp; 🕯️ <strong>آخر شمعة:</strong> <span dir="ltr">{latest_bar_dt}</span> &nbsp;|&nbsp; 📊 <strong>الأسهم:</strong> {len(df_summary)}
+    📡 <strong>المصدر:</strong> {active_source} &nbsp;|&nbsp; 🕒 <strong>آخر سحب:</strong> <span dir="ltr">{last_update_time}</span> &nbsp;|&nbsp; 🕯️ <strong>آخر شمعة:</strong> <span dir="ltr">{latest_bar_dt}</span> &nbsp;|&nbsp; 📊 <strong>السهم المحدد:</strong> {selected_short}
 </div>
 """, unsafe_allow_html=True)
 
@@ -425,7 +466,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 with tab1:
-    row = get_first_row(df_summary[df_summary["الرمز"] == selected_short])
+    row = get_row_at(df_summary[df_summary["الرمز"] == selected_short], 0)
     df_chart = hist_dict[row["ticker_full"]]
     
     st.subheader(f"📌 {row['اسم الشركة']} ({selected_short}) — فريم {timeframe_opt}")
@@ -446,7 +487,7 @@ with tab1:
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("آخر سعر", f"{row['آخر سعر']} EGP", f"{row['التغير %']}%")
     c2.metric("نقطة الارتكاز (P)", f"{row['Pivot']}")
-    c3.metric("المقاومة R1", f"{row['R1']}", f"+{row['المسافة لـ R1 %']}%")
+    c3.metric("المقاومة R1", f"{row['R1']}", f"{row['الهدف R1 %']}%")
     c4.metric("المقاومة R2", f"{row['R2']}")
     c5.metric("الدعم S1", f"{row['S1']}")
     c6.metric("حجم التداول", f"{row['نسبة السيولة']}x", "مقارنة بالمتوسط")
@@ -516,18 +557,19 @@ with tab1:
     st.plotly_chart(fig, use_container_width=True)
 with tab2:
     st.subheader(f"📋 رادار البورصة المصرية الشامل ({pivot_method} Pivots — {timeframe_opt})")
+    st.caption("💡 **تلميح:** اضغط على أي صف أو رمز سهم في الجدول بالأسفل لاختياره فوراً وعرض تحليله في الشارت وحاسبة الصفقات.")
     
     col_f1, col_f2 = st.columns(2)
     filter_opt = col_f1.radio("تصفية حسب الاتجاه:", ["الكل", "صاعد 🟢", "هابط 🔴"], horizontal=True)
     vol_filter = col_f2.radio("تصفية حسب حجم التداول (Volume):", ["جميع الأحجام", "سيولة مرتفعة 🔥 / عالية 📈", "سيولة قليلة 📉"], horizontal=True)
     
-    table_df = df_summary.drop(columns=["ticker_full", "توقيت الشمعة", "أعلى الشمعة", "أقل الشمعة", "نسبة السيولة"])
+    table_df = df_summary.drop(columns=["ticker_full", "توقيت الشمعة", "نسبة السيولة"]).reset_index(drop=True)
     if filter_opt != "الكل":
-        table_df = table_df[table_df["الاتجاه"] == filter_opt]
+        table_df = table_df[table_df["الاتجاه"] == filter_opt].reset_index(drop=True)
     if vol_filter == "سيولة مرتفعة 🔥 / عالية 📈":
-        table_df = table_df[table_df["حجم التداول"].str.contains("مرتفع|عالي")]
+        table_df = table_df[table_df["حجم التداول"].str.contains("مرتفع|عالي")].reset_index(drop=True)
     elif vol_filter == "سيولة قليلة 📉":
-        table_df = table_df[table_df["حجم التداول"].str.contains("قليل")]
+        table_df = table_df[table_df["حجم التداول"].str.contains("قليل")].reset_index(drop=True)
 
     def style_table(val):
         if isinstance(val, str):
@@ -536,24 +578,44 @@ with tab2:
             if "عالي" in val or "تشبع بيعي" in val: return "color: #2563eb; font-weight: bold;"
         return ""
 
-    st.dataframe(
+    event = st.dataframe(
         table_df.style
         .map(style_table)
         .background_gradient(subset=["S1", "S2", "S3"], cmap="Greens", low=0.25, high=0.55)
         .background_gradient(subset=["R1", "R2", "R3"], cmap="Reds", low=0.25, high=0.55)
         .format(precision=2),
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="radar_table_select"
     )
+
+    if event and len(event.selection.rows) > 0:
+        selected_row_idx = get_first_item(event.selection.rows, 0)
+        clicked_ticker = get_row_at(table_df, selected_row_idx)["الرمز"]
+        if clicked_ticker != st.session_state["active_symbol"]:
+            st.session_state["active_symbol"] = clicked_ticker
+            st.rerun()
 
 with tab3:
     st.subheader(f"🧮 تسجيل صفقة جديدة ومتابعتها لسهم {selected_short}")
-    row = get_first_row(df_summary[df_summary["الرمز"] == selected_short])
+    row = get_row_at(df_summary[df_summary["الرمز"] == selected_short], 0)
+    
+    curr_price_val = float(row["آخر سعر"])
+    
+    valid_supports = [float(row["S1"]), float(row["S2"]), float(row["S3"])]
+    below_supports = [s for s in valid_supports if s < curr_price_val]
+    default_sl = get_first_item(below_supports, round(curr_price_val * 0.98, 2))
+
+    valid_resistances = [float(row["Pivot"]), float(row["R1"]), float(row["R2"]), float(row["R3"])]
+    above_resistances = [r for r in valid_resistances if r > curr_price_val]
+    default_target = get_first_item(above_resistances, round(curr_price_val * 1.03, 2))
     
     col_in1, col_in2, col_in3 = st.columns(3)
-    entry_price = col_in1.number_input("سعر الشراء (EGP):", value=float(row["آخر سعر"]), step=0.05)
-    stop_loss = col_in2.number_input("سعر وقف الخسارة (مقترح S1):", value=float(row["S1"]), step=0.05)
-    target_price = col_in3.number_input("سعر الهدف (مقترح R1):", value=float(row["R1"]), step=0.05)
+    entry_price = col_in1.number_input("سعر الشراء (EGP):", value=curr_price_val, step=0.05, key=f"entry_{selected_short}")
+    stop_loss = col_in2.number_input("وقف الخسارة (أقرب دعم فعلي):", value=default_sl, step=0.05, key=f"sl_{selected_short}")
+    target_price = col_in3.number_input("سعر الهدف (أقرب مقاومة فعلية):", value=default_target, step=0.05, key=f"target_{selected_short}")
 
     risk = entry_price - stop_loss
     reward = target_price - entry_price
@@ -604,7 +666,7 @@ with tab4:
                 stock_df = hist_dict[full_sym].copy()
                 if stock_df.index.tz is not None:
                     stock_df.index = stock_df.index.tz_localize(None)
-                curr_p = round(float(stock_df.iloc[-1]["Close"]), 2)
+                curr_p = round(float(get_row_at(stock_df, -1)["Close"]), 2)
                 
                 future_bars = stock_df[stock_df.index > entry_dt]
                 
